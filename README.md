@@ -254,8 +254,7 @@ the buffer → plan rules, keys, source) for GitHub Pages: Settings → Pages �
 Deploy from branch → `main` / `/docs`. Rebuild it after code changes with
 `python docs/src/build_page.py` (runs `cargo test` for the test list; the
 screens are ANSI captures from `herdr pane read --format ansi` in
-`docs/src/shots/`). Replace `OWNER` in the clone URL in
-`docs/src/page.tpl.html` once the repo exists.
+`docs/src/shots/`).
 
 ## Acknowledgements
 
