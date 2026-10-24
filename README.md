@@ -3,6 +3,11 @@
 An [oil.nvim](https://github.com/stevearc/oil.nvim)-style file explorer and a
 fuzzy finder for [herdr](https://herdr.dev), in a popup like herdr-hop.
 
+**Project page:** <https://christineecker.github.io/herdr-oil/> (screens,
+an interactive model of the buffer → plan rules, keys, source).
+
+[![herdr-oil: the listing is a buffer — two new entries, two renames, a copy and two deletes pending until :w](docs/img/explorer.png)](https://christineecker.github.io/herdr-oil/)
+
 The directory listing **is a text buffer**. Edit it with vim keys, then `:w`:
 herdr-oil diffs the buffer against the disk, shows the plan, and applies it.
 
@@ -88,13 +93,7 @@ shares its `recent.tsv`, so hopping from either plugin ranks the same; a
 `[projects]` table in herdr-oil's config overrides any of these (and
 `recent_file`). Without herdr-hop the defaults are `~/Projects`, depth 2.
 
-```
-▌▎▶  atlas ◆        2m   main           ●3 1▶ working
- ▎▶  site           3h   main           ○ 1▶ idle
- ▎   notes-wiki     1d   main           ○
-  ▶  atlas-render        fix/render     (atlas) ○ 1▶ waiting
-     ledger              feat/import
-```
+![Projects tab: recent hops first, open workspaces with their agents, branch and changes, and a preview of the selected project](docs/img/projects.png)
 
 `▎` recent · `▶` open workspace · stack icon · time since the hop · branch
 (peach when detached, `(repo)` for linked worktrees) · `●N` changed /
@@ -249,12 +248,14 @@ Layout: `buffer.rs` (lines with hidden ids) · `vim.rs` (modal editing) ·
 
 ## Project page
 
-`docs/index.html` is a self-contained overview (screens, interactive model of
-the buffer → plan rules, keys, source) for GitHub Pages: Settings → Pages →
-Deploy from branch → `main` / `/docs`. Rebuild it after code changes with
+Live at <https://christineecker.github.io/herdr-oil/>, served by GitHub
+Pages from `docs/index.html` (Settings → Pages → Deploy from branch →
+`main` / `/docs`), a self-contained overview: screens, interactive model of
+the buffer → plan rules, keys, source. Rebuild it after code changes with
 `python docs/src/build_page.py` (runs `cargo test` for the test list; the
 screens are ANSI captures from `herdr pane read --format ansi` in
-`docs/src/shots/`).
+`docs/src/shots/`). The README images come from the same captures:
+`python docs/src/readme_shots.py` (headless Chrome and a Nerd Font).
 
 ## Acknowledgements
 
