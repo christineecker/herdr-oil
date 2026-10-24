@@ -552,15 +552,38 @@ fn discovery_env() -> bool {
 /// (config can include other files whose changes we cannot see).
 const FILTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Modification times of the repository's own config files: a change there
-/// invalidates the cached filter verdict at once.
-fn config_stamp(root: &Path) -> Vec<Option<SystemTime>> {
+/// The git directory of a work tree: `.git` itself, or where a `.git`
+/// file (`gitdir: …`, worktrees and submodules) points.
+fn git_dir(root: &Path) -> Option<PathBuf> {
     let git = root.join(".git");
-    let gitdir = if git.is_dir() { git } else { root.to_path_buf() };
-    ["config", "config.worktree"].iter().map(|f| fs::metadata(gitdir.join(f)).and_then(|m| m.modified()).ok()).collect()
+    if git.is_dir() {
+        return Some(git);
+    }
+    let text = fs::read_to_string(&git).ok()?;
+    let p = PathBuf::from(text.lines().next()?.strip_prefix("gitdir:")?.trim());
+    Some(if p.is_absolute() { p } else { root.join(p) })
 }
 
-type FilterCache = HashMap<PathBuf, (std::time::Instant, Vec<Option<SystemTime>>, bool)>;
+/// Modification times of the repository's own config files (a worktree's
+/// own and its main repository's): a change there invalidates the cached
+/// filter verdict at once.
+fn config_stamp(root: &Path) -> Vec<Option<SystemTime>> {
+    let Some(gd) = git_dir(root) else { return vec![] };
+    let common = fs::read_to_string(gd.join("commondir")).ok().map(|c| {
+        let c = PathBuf::from(c.trim());
+        if c.is_absolute() { c } else { gd.join(c) }
+    });
+    let mtime = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut v = vec![mtime(gd.join("config")), mtime(gd.join("config.worktree"))];
+    if let Some(c) = common {
+        v.push(mtime(c.join("config")));
+        v.push(mtime(c.join("config.worktree")));
+    }
+    v
+}
+
+/// Cached verdict: when, for which work tree and git dir, config stamps, result.
+type FilterCache = HashMap<PathBuf, (std::time::Instant, PathBuf, Option<PathBuf>, Vec<Option<SystemTime>>, bool)>;
 
 fn filter_cache() -> &'static std::sync::Mutex<FilterCache> {
     static C: std::sync::OnceLock<std::sync::Mutex<FilterCache>> = std::sync::OnceLock::new();
@@ -582,15 +605,17 @@ pub fn repo_defines_filters(dir: &Path) -> bool {
     if discovery_env() {
         return filters_uncached(dir);
     }
-    let stamp = config_stamp(&root);
-    if let Some((t, st, v)) = filter_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
-        if st == stamp && t.elapsed() < FILTER_TTL {
+    let (gd, stamp) = (git_dir(&root), config_stamp(&root));
+    // only a verdict for this very repository counts (a nested one may
+    // have appeared since)
+    if let Some((t, r, g, st, v)) = filter_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
+        if r == root && g == gd && st == stamp && t.elapsed() < FILTER_TTL {
             return v;
         }
     }
     let v = filters_uncached(dir);
     if let Ok(mut c) = filter_cache().lock() {
-        c.insert(key, (std::time::Instant::now(), stamp, v));
+        c.insert(key, (std::time::Instant::now(), root, gd, stamp, v));
     }
     v
 }
@@ -819,6 +844,36 @@ mod tests {
         assert!(git_status(&evil).is_empty());
         assert!(crate::git::guard(&evil).is_err());
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn nested_repo_gets_its_own_verdict() {
+        let t = crate::plan::tests::tmpdir("git-nested");
+        let git = |args: &[&str], d: &Path| std::process::Command::new("git").args(args).current_dir(d).output().unwrap();
+        git(&["init", "-q"], &t.0);
+        let sub = t.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        assert!(!repo_defines_filters(&sub), "cached: no filters");
+        // within the cache window a repository with a filter appears here
+        git(&["init", "-q"], &sub);
+        git(&["config", "filter.x.clean", "false"], &sub);
+        assert!(repo_defines_filters(&sub));
+    }
+
+    #[test]
+    fn worktree_config_is_stamped() {
+        let t = crate::plan::tests::tmpdir("git-worktree-stamp");
+        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&t.0).output().unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "x"]);
+        let wt = t.0.join("wt");
+        git(&["worktree", "add", "-q", wt.to_str().unwrap()]);
+        assert!(config_stamp(&wt).iter().any(Option::is_some), "follows the .git file to the main config");
+        assert!(!repo_defines_filters(&wt));
+        git(&["config", "filter.x.clean", "false"]);
+        assert!(repo_defines_filters(&wt));
     }
 
     #[test]
