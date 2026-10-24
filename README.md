@@ -54,9 +54,15 @@ focused pane's working directory.
 
 ## Opening files
 
-`⏎` follows `open` in the config (default `auto`): when the pane you came from
-sits at a shell prompt, `$EDITOR file` is typed there; otherwise a split opens
-to its right. Agents are never typed into. Explicit keys:
+`⏎` follows `open` in the config. The default `view` shows the file inside the
+oil window: syntax-highlighted, scrollable (`j k ␣ b ^d ^u g G`), `e` edits it
+in `$EDITOR` inside the popup, `q` goes back. A preview pane sits next to the
+listing by default (`^p` toggles it).
+
+With `open = "auto"`, `$EDITOR file` is typed into the pane you came from when
+it sits at a shell prompt, otherwise a split opens to its right. Agents are
+never typed into, and names with control characters are never typed at all.
+Explicit keys, from the listing or the viewer:
 
 | key  | target |
 |------|--------|
@@ -75,13 +81,21 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 
 | explorer | |
 |---|---|
-| `⏎` `-` `_` `~` | open · parent · start dir · home |
+| `⏎` `-` `_` `~` | view file / enter dir · parent · start dir · home |
 | `:w` `^s` `ZZ` | review & apply · apply and quit |
+| `q` `esc` | close (asks first when edits are unsaved; esc cancels a pending key first) |
 | `u` `^r` | undo · redo (per directory) |
 | `g.` `gs` `gd` `^p` | hidden · sort · sizes/details/off · preview |
 | `gy` | copy absolute path |
 | `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:e!` | |
 | `⇥` `␣f` `␣g` `␣d` `␣r` | finder: files · grep · dirs · recent |
+
+| viewer (`⏎` on a file) | |
+|---|---|
+| `j` `k` `␣` `b` `^d` `^u` `g` `G` | scroll |
+| `e` | edit in `$EDITOR` inside the popup, back to the viewer after |
+| `^v` `^x` `^t` `o` `y` | split right · below · tab · system app · copy path |
+| `q` `esc` | back to the listing or finder |
 
 | finder | |
 |---|---|
@@ -132,3 +146,15 @@ Deploy from branch → `main` / `/docs`. Rebuild it after code changes with
 screens are ANSI captures from `herdr pane read --format ansi` in
 `docs/src/shots/`). Replace `OWNER` in the clone URL in
 `docs/src/page.tpl.html` once the repo exists.
+
+## Acknowledgements
+
+herdr-oil exists because of [oil.nvim](https://github.com/stevearc/oil.nvim)
+by Steven Arcangeli. The central idea comes from oil: the directory listing is
+an ordinary editable buffer where every line carries a hidden entry id, and
+saving diffs that buffer against the disk and asks before applying creates,
+renames, moves, copies and deletes. Key choices like `-` for the parent
+directory and `g.` for hidden files follow oil too.
+
+herdr-oil is an independent Rust reimplementation for herdr popups, not a
+port. No oil.nvim code is used. Please star and support the original.

@@ -4,6 +4,9 @@
 # :w shows the plan and applies it. Plus a fuzzy finder (files, dirs, live
 # grep, recent) with previews. Both open in a popup like herdr-hop.
 #
+# Inspired by oil.nvim (https://github.com/stevearc/oil.nvim) by Steven
+# Arcangeli; independent reimplementation, no oil.nvim code.
+#
 # Install (local checkout):  herdr plugin link /path/to/herdr-oil
 # Bind the actions in config.toml (see README).
 

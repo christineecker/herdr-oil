@@ -137,7 +137,7 @@ header.hero { padding-top: 56px; display: grid; gap: 28px; }
 .phase p { color: var(--muted); font-size: .95rem; }
 
 /* keys */
-.keygrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.keygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 20px; }
 .keylist { display: grid; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .keylist h3 { padding: 14px 16px 10px; font-size: 1rem; }
 .kv { display: grid; grid-template-columns: minmax(120px, 38%) minmax(0, 1fr); gap: 12px; padding: 8px 16px; border-top: 1px solid var(--line); font-size: .92rem; align-items: baseline; }
@@ -219,7 +219,7 @@ footer { color: var(--muted); font-size: .9rem; border-top: 1px solid var(--line
     <div style="display:grid;gap:18px">
       <span class="eyebrow">herdr plugin · v0.1.0</span>
       <h1>herdr-oil</h1>
-      <p class="lede">The directory listing is a text buffer. Rename, create, delete, move and copy by editing lines with vim keys, then <em>:w</em>. A fuzzy finder and live grep live in the same popup.</p>
+      <p class="lede">An <a href="https://github.com/stevearc/oil.nvim">oil.nvim</a>-style explorer for herdr. The directory listing is a text buffer. Rename, create, delete, move and copy by editing lines with vim keys, then <em>:w</em>. A fuzzy finder and live grep live in the same popup.</p>
     </div>
     <div class="facts" aria-label="Status">
       <span class="fact"><b>__TESTCOUNT__</b> tests passing</span>
@@ -346,14 +346,26 @@ command = "herdr-oil.grep"</pre>
     <h2>Defaults worth knowing, and current limits</h2>
   </div>
   <div class="notes">
-    <div class="note decide"><span class="tag">Decision</span><h3>Enter types into your shell pane</h3><p>The default <code>open = "auto"</code> types <code>$EDITOR file</code> into the pane you opened the popup from, but only when that pane has no agent and only a shell in the foreground. Otherwise it opens a split to the right. Set <code>open = "split"</code> if you never want typing.</p></div>
+    <div class="note decide"><span class="tag">Decision</span><h3>Enter views the file inside oil</h3><p>The default <code>open = "view"</code> shows the file highlighted and scrollable in the oil window; <code>e</code> edits it in <code>$EDITOR</code> in the same popup. <code>open = "auto"</code> instead types <code>$EDITOR file</code> into the pane you came from when it idles at a shell prompt, and never types names that contain control characters.</p></div>
     <div class="note decide"><span class="tag">Decision</span><h3>Keybindings</h3><p>The suggested <kbd>prefix d</kbd>, <kbd>prefix ⇧F</kbd> and <kbd>prefix /</kbd> are free in herdr’s defaults. If a key does nothing, a built-in action on the same chord wins; set that built-in to <code>""</code> in <code>[keys]</code>.</p></div>
+    <div class="note decide"><span class="tag">Decision</span><h3>Esc closes the explorer</h3><p>Esc keeps its vim meaning first: it leaves insert, visual or command mode and cancels a half-typed key. On a clean slate in normal mode it closes the popup, after a save, discard or cancel prompt when edits are unsaved.</p></div>
     <div class="note decide"><span class="tag">Decision</span><h3>Splits close with the editor</h3><p>Split and tab targets run <code>exec $EDITOR</code>, so quitting the editor closes the pane. Typing into the origin pane does not use exec.</p></div>
     <div class="note decide"><span class="tag">Decision</span><h3>Confirm dialog stays on</h3><p>Every save is reviewed by default. <code>confirm = false</code> skips it, except when something would be deleted.</p></div>
     <div class="note limit"><span class="tag">Limit</span><h3>No undo for applied changes</h3><p><kbd>u</kbd> undoes buffer edits only. Deleted files can be restored from the Trash; renames and moves have no history.</p></div>
     <div class="note limit"><span class="tag">Limit</span><h3>Relative symlinks keep their target text</h3><p>Moving a relative symlink into another folder does not rewrite it, so it can break. The <code>DESIGN.md</code> move in the screens is an example.</p></div>
     <div class="note limit"><span class="tag">Limit</span><h3>Screens come from a regular pane</h3><p>herdr gives popups no readable pane id, so the captures were taken in a normal herdr pane running the same binary.</p></div>
     <div class="note ok"><span class="tag">Checked</span><h3>Tested against real directories</h3><p>The planner and apply engine tests run on temporary folders: swaps, case-only renames, nested renames, recursive copies with symlinks, and no leftover staging files.</p></div>
+  </div>
+</section>
+
+<section id="credits">
+  <div class="sec-head">
+    <span class="eyebrow">Acknowledgements</span>
+    <h2>Built on the idea of oil.nvim</h2>
+  </div>
+  <div class="prose" style="display:grid;gap:14px">
+    <p>herdr-oil exists because of <a href="https://github.com/stevearc/oil.nvim">oil.nvim</a> by Steven Arcangeli. The central idea comes from oil: the directory listing is an ordinary editable buffer where every line carries a hidden entry id, and saving diffs that buffer against the disk and asks before applying creates, renames, moves, copies and deletes. Keys like <kbd>-</kbd> for the parent directory and <kbd>g.</kbd> for hidden files follow oil too.</p>
+    <p style="color:var(--muted)">herdr-oil is an independent Rust reimplementation for herdr popups, not a port, and uses no oil.nvim code. If you live in Neovim, use the original.</p>
   </div>
 </section>
 
@@ -383,7 +395,7 @@ command = "herdr-oil.grep"</pre>
   </div>
 </section>
 
-<footer>Built for herdr 0.9.5 on macOS. Rust, ratatui 0.30, nucleo, ignore; previews through bat and search through ripgrep when installed.</footer>
+<footer>Inspired by <a href="https://github.com/stevearc/oil.nvim">oil.nvim</a> by Steven Arcangeli. Built for herdr 0.9.5 on macOS. Rust, ratatui 0.30, nucleo, ignore; previews through bat and search through ripgrep when installed.</footer>
 </div>
 
 <script id="data" type="application/json">/*__DATA__*/null</script>
@@ -511,8 +523,9 @@ command = "herdr-oil.grep"</pre>
 
   // ── keys ──
   var KEYS = [
-    ["Explorer: navigate and open", [["⏎", "open file, enter folder"], ["- ⌫", "parent folder"], ["_ ~", "start folder, home"], ["^v ^x ^t", "open in split right, below, new tab"], ["^e", "edit inside the popup"], ["gx gy", "system app, copy path"], ["g. gs gd ^p", "hidden, sort, details, preview"], ["⇥", "switch to the finder"], ["q ZZ ZQ", "quit, apply and quit, discard and quit"]]],
+    ["Explorer: navigate and open", [["⏎", "view file in oil, enter folder"], ["e (viewer)", "edit in $EDITOR in the popup"], ["- ⌫", "parent folder"], ["_ ~", "start folder, home"], ["^v ^x ^t", "open in split right, below, new tab"], ["^e", "edit inside the popup"], ["gx gy", "system app, copy path"], ["g. gs gd ^p", "hidden, sort, details, preview"], ["⇥", "switch to the finder"], ["q esc ZZ ZQ", "close (asks if unsaved), apply and quit, discard and quit"]]],
     ["Explorer: edit = file operations", [["cw ciw cin can", "rename (cin is the stem, can the extension)"], ["o O", "new line creates a file, name/ a folder"], ["dd 3dd V…d", "delete"], ["dd, - , p", "cut and paste elsewhere moves"], ["yy p", "duplicate copies"], ["u ^r", "undo, redo"], [":w ^s", "review and apply"], [":touch a b", "add several files"], [":cd ~/x :sort mtime", "jump, sort"]]],
+    ["Viewer (⏎ on a file)", [["j k ␣ b", "scroll by line or page"], ["^d ^u g G", "half page, top, bottom"], ["e", "edit in $EDITOR inside the popup"], ["^v ^x ^t o", "split right, below, new tab, system app"], ["y", "copy path"], ["q esc", "back to the listing or finder"]]],
     ["Finder", [["type", "fuzzy query: 'exact ^prefix suffix$ !not"], ["⇥ ⇧⇥", "Files, Dirs, Grep, Recent"], ["⏎ ^v ^x ^t ^e", "open with the default, split, below, tab, popup"], ["^o", "reveal in the explorer"], ["^space", "mark several, ⏎ opens all"], ["^r", "root: cwd, repository, parent"], ["alt-h alt-i alt-p", "hidden, ignored, preview"], ["^y", "copy path"], ["esc", "back to the explorer"]]],
     ["Vim support", [["h j k l w b e", "motions with counts"], ["0 ^ $ gg G 12G", "line positions"], ["f F t T ;", "find character"], ["d c y + motion", "operators, iw aw iW aW in an"], ["x X s S C D r J ~", "single-key edits"], ["V", "visual line: d y c u U"], ["/text n N", "search"], [":w :q :q! :wq :e!", "ex commands"]]]
   ];

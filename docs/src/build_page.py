@@ -115,8 +115,8 @@ def ansi_to_html(text, rows=None):
 
 SCREENS = [
     ("01-explorer", "Explorer", "Sizes and preview",
-     "The popup opens on the focused pane's directory. Files show their size and folders their item count. Git markers sit in the gutter (M modified, ? untracked, ! ignored); symlinks show their target as virtual text.",
-     ["^p", "/READ ⏎"]),
+     "The popup opens on the focused pane's directory with a preview of the line under the cursor. Files show their size and folders their item count. Git markers sit in the gutter (M modified, ? untracked, ! ignored); symlinks show their target as virtual text.",
+     ["/READ ⏎"]),
     ("02-edits", "Editing", "Pending edits",
      "Every change is just text. The gutter and header come from the real plan: + create, ~ rename, ⧉ copy, and two pending deletes counted in the header.",
      ["^p", "/todo ⏎ dd", "/README ⏎ cin INTRO ⎋", "/LIC ⏎ yyp A -APACHE ⎋", "/scripts ⏎ cin bin ⎋", "/run.log ⏎ dd", "gg O benches/render.rs ⎋", "o notes/ ⎋"]),
@@ -133,11 +133,14 @@ SCREENS = [
      "Tab switches to the finder. A parallel walk that honours .gitignore feeds nucleo; matched characters are highlighted and the preview runs through bat.",
      ["⇥", "prsmod"]),
     ("07-grep", "Grep", "Live ripgrep",
-     "Grep mode re-runs ripgrep as you type, debounced. The preview jumps to the hit line; Enter opens the file at that line.",
+     "Grep mode re-runs ripgrep as you type, debounced. The preview jumps to the hit line.",
      ["⇥ ⇥", "TODO"]),
-    ("08-help", "Help", "Everything on one sheet",
-     "g? opens the full keymap inside the popup.",
-     ["g?"]),
+    ("08-viewer", "Viewer", "Read it inside oil",
+     "Enter shows the file in the oil window, highlighted and scrollable, opened at the grep hit. e edits it in $EDITOR inside the same popup; q goes back to where you came from.",
+     ["⏎"]),
+    ("09-help", "Help", "Everything on one sheet",
+     "g? opens the full keymap inside the popup. Esc closes the explorer, and asks first when there are unsaved edits.",
+     ["q", "esc", "^p", "gd gd", "g?"]),
 ]
 
 
