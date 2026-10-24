@@ -20,9 +20,10 @@ impl Line {
     pub fn chars(&self) -> usize {
         self.text.chars().count()
     }
-    /// The entry name on the line: no trailing slash, no `-> target`.
-    pub fn name(&self) -> &str {
-        crate::plan::split_link(&self.text).0.trim().trim_end_matches('/')
+    /// The entry name on the line: no trailing slash, no `-> target` (for
+    /// symlinks and new lines; see `plan::line_parts`).
+    pub fn name(&self, store: &Store) -> &str {
+        crate::plan::line_parts(&self.text, self.id.and_then(|id| store.get(id))).0.trim().trim_end_matches('/')
     }
     /// The line counts for planning: blank new lines are ignored.
     pub fn significant(&self) -> bool {
@@ -224,7 +225,7 @@ impl Buffer {
     pub fn cur_entry<'a>(&self, store: &'a Store) -> Option<&'a Entry> {
         let l = self.cur();
         let e = store.get(l.id?)?;
-        (l.name() == e.name).then_some(e)
+        (l.name(store) == e.name).then_some(e)
     }
 
     // ── text primitives (char indices) ──────────────────────────────────────

@@ -146,6 +146,28 @@ fn send_words(paths: &[(PathBuf, Option<usize>)], start: &Path, agent: bool) -> 
         .collect()
 }
 
+/// Change permissions through a handle opened with O_NOFOLLOW, so a file
+/// swapped for a symlink after listing is refused instead of followed.
+fn chmod_nofollow(p: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p) {
+        Ok(f) => f,
+        // unreadable (e.g. mode 000): fall back to a fresh lstat check
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let m = std::fs::symlink_metadata(p)?;
+            if !(m.is_file() || m.is_dir()) {
+                return Err(std::io::Error::other("not a regular file or directory"));
+            }
+            return std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+        }
+        Err(e) => return Err(e),
+    };
+    if !(f.metadata()?.is_file() || f.metadata()?.is_dir()) {
+        return Err(std::io::Error::other("not a regular file or directory"));
+    }
+    f.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
 /// `:chmod` spec on a mode: octal (`755`) or `[ugoa]*[+-=][rwx]+` (`+x`, `go-w`).
 pub fn chmod_mode(mode: u32, spec: &str) -> Option<u32> {
     if !spec.is_empty() && spec.len() <= 4 && spec.chars().all(|c| ('0'..='7').contains(&c)) {
@@ -300,8 +322,9 @@ impl App {
         }
         self.cwd = dir;
         if let Some(name) = focus {
-            let b = self.buf_mut();
-            if let Some(i) = b.lines.iter().position(|l| l.name() == name) {
+            let store = &self.store;
+            let b = self.buffers.get_mut(&self.cwd).unwrap();
+            if let Some(i) = b.lines.iter().position(|l| l.name(store) == name) {
                 b.row = i;
             }
         }
@@ -356,7 +379,7 @@ impl App {
             self.last_batch = Some(rep.undo.clone());
         }
         let focus = rep.landed.iter().find(|p| p.parent() == Some(self.cwd.as_path())).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let focus = focus.or_else(|| self.buf().cur().name().split('/').next().map(str::to_string));
+        let focus = focus.or_else(|| self.buf().cur().name(&self.store).split('/').next().map(str::to_string));
         self.reload_all(focus);
         if rep.errors.is_empty() {
             let msg = match (undo, rep.permanent) {
@@ -569,7 +592,7 @@ impl App {
                 }
                 self.hidden = !self.hidden;
                 let cwd = self.cwd.clone();
-                let name = self.buf().cur().name().to_string();
+                let name = self.buf().cur().name(&self.store).to_string();
                 self.buffers.clear();
                 self.goto(&cwd, Some(&name));
                 self.flash(if self.hidden { "showing hidden files" } else { "hiding dotfiles" }, MsgKind::Info);
@@ -859,7 +882,6 @@ impl App {
     /// `:chmod` — permission changes are not part of the edit plan, they
     /// apply to the selected entries right away.
     fn chmod(&mut self, spec: &str, ids: &[u64]) {
-        use std::os::unix::fs::PermissionsExt;
         let (mut done, mut errs) = (0, Vec::new());
         for id in ids {
             let Some(e) = self.store.get(*id).cloned() else { continue };
@@ -870,7 +892,7 @@ impl App {
                 self.flash(format!("chmod: bad mode {spec} (try +x, go-w, 644)"), MsgKind::Err);
                 return;
             };
-            match std::fs::set_permissions(&e.path, std::fs::Permissions::from_mode(mode)) {
+            match chmod_nofollow(&e.path, mode) {
                 Ok(()) => {
                     done += 1;
                     if let Some(x) = self.store.entries.get_mut(id) {
@@ -1602,5 +1624,17 @@ mod tests {
         let ps = vec![(PathBuf::from("/r/src/app.rs"), Some(42)), (PathBuf::from("/elsewhere/a b"), None)];
         assert_eq!(send_words(&ps, start, true), ["@src/app.rs:42", "@/elsewhere/a b"]);
         assert_eq!(send_words(&ps[1..], start, false), [open::sh_quote("/elsewhere/a b")]);
+    }
+
+    #[test]
+    fn chmod_refuses_symlinks_and_handles_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, _app) = app_in("chmod-nofollow");
+        std::os::unix::fs::symlink(t.0.join("a.txt"), t.0.join("l")).unwrap();
+        assert!(chmod_nofollow(&t.0.join("l"), 0o777).is_err());
+        assert_ne!(std::fs::metadata(t.0.join("a.txt")).unwrap().permissions().mode() & 0o777, 0o777);
+        std::fs::set_permissions(t.0.join("b.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        chmod_nofollow(&t.0.join("b.txt"), 0o644).unwrap();
+        assert_eq!(std::fs::metadata(t.0.join("b.txt")).unwrap().permissions().mode() & 0o777, 0o644);
     }
 }

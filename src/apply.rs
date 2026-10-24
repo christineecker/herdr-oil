@@ -491,13 +491,20 @@ mod tests {
     }
 
     #[test]
-    fn target_on_a_plain_file_is_an_error() {
-        let t = tmpdir("apply-notlink");
-        fs::write(t.0.join("a"), "").unwrap();
+    fn arrows_in_names_are_just_names() {
+        // a plain file and a symlink whose names contain " -> ": unchanged
+        // lines plan nothing; on a plain file the arrow is part of a rename
+        let t = tmpdir("apply-arrow");
+        fs::write(t.0.join("a -> b"), "").unwrap();
+        fs::write(t.0.join("x"), "").unwrap();
+        std::os::unix::fs::symlink("y -> z", t.0.join("l -> m")).unwrap();
         let mut store = Store::default();
         let mut b = Buffer::load(&t.0, &mut store, false, Sort::Name, false);
-        set(&mut b, "a", "a -> b");
-        assert!(build([&b], &store).errors.iter().any(|e| e.contains("not a symlink")));
+        let p = build([&b], &store);
+        assert!(p.ops.is_empty() && p.errors.is_empty(), "{:?} {:?}", p.ops, p.errors);
+        set(&mut b, "x", "x -> y");
+        let p = build([&b], &store);
+        assert_eq!(p.ops, vec![Op::Move { src: t.0.join("x"), dst: t.0.join("x -> y"), dir: false }]);
     }
 
     #[test]

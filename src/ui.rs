@@ -233,14 +233,14 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let empty_dir = b.lines.len() == 1 && !b.lines[0].significant() && b.error.is_none();
     for (i, l) in b.lines.iter().enumerate().skip(b.scroll).take(list_inner.height as usize) {
         let entry = l.id.and_then(|id| store.get(id));
-        let name_now = l.name();
-        let (_, link_now) = plan::split_link(&l.text);
+        let (name_part, link_now) = plan::line_parts(&l.text, entry);
+        let name_now = name_part.trim().trim_end_matches('/');
         // change marker, straight from the plan
         let untouched = entry.is_some_and(|e| e.name == name_now && e.path.parent() == Some(b.dir.as_path()) && link_now.map_or(true, |t| Some(t) == e.link_target.as_deref()));
         let (mark, mcol) = if !l.significant() || (untouched && original.contains(&l.id.unwrap_or(0))) {
             (" ", th.dim)
         } else {
-            match plan::parse_name(plan::split_link(&l.text).0) {
+            match plan::parse_name(name_part) {
                 Err(_) => ("!", th.red),
                 Ok(None) => (" ", th.dim),
                 Ok(Some((rel, _))) => match tags.get(&plan::key(&plan::normalize(&b.dir.join(rel)))) {
@@ -348,7 +348,7 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
             spans.push(Span::styled("(empty — o to add a file, name/ for a dir)", Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
         } else {
             // ` -> target` of a symlink line in teal; the normal-mode cursor reversed
-            let arrow = link_now.map(|_| plan::split_link(&l.text).0.chars().count());
+            let arrow = link_now.map(|_| name_part.chars().count());
             let link_style = Style::default().fg(th.teal).add_modifier(Modifier::DIM);
             let cursor = (is_cur && matches!(mode, Mode::Normal)).then(|| b.col.saturating_sub(off));
             let mut cells: Vec<(char, Style)> = shown

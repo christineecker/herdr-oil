@@ -103,6 +103,22 @@ pub fn split_link(text: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Name and `-> target` of a buffer line. Only lines of listed symlinks
+/// (and new lines) are split: a regular file may well be called `a -> b`.
+/// A symlink line that still reads exactly as listed maps back to the
+/// entry's own name and target, whatever either contains.
+pub fn line_parts<'a>(text: &'a str, entry: Option<&crate::entry::Entry>) -> (&'a str, Option<&'a str>) {
+    match entry {
+        Some(e) if e.link_target.is_none() => (text, None),
+        Some(e) if text == e.display() => {
+            let t = e.link_target.as_deref().unwrap_or("");
+            let n = text.len() - t.len() - " -> ".len();
+            (&text[..n], Some(&text[n + " -> ".len()..]))
+        }
+        _ => split_link(text),
+    }
+}
+
 /// Parse a buffer line into (relative path, wants-dir). `None` for blank.
 pub fn parse_name(text: &str) -> Result<Option<(PathBuf, bool)>, String> {
     let t = text.trim();
@@ -143,7 +159,7 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
             if !line.significant() {
                 continue;
             }
-            let (name, target) = split_link(&line.text);
+            let (name, target) = line_parts(&line.text, line.id.and_then(|id| store.get(id)));
             if target == Some("") {
                 plan.errors.push(format!("{}: line {}: missing symlink target after ->", short(&b.dir), i + 1));
                 continue;
@@ -168,14 +184,7 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
             };
             let dst = normalize(&b.dir.join(&parsed.0));
             match line.id {
-                Some(id) if store.get(id).is_some() => {
-                    let e = store.get(id).unwrap();
-                    if target.is_some() && e.link_target.is_none() {
-                        plan.errors.push(format!("{}: line {}: {} is not a symlink — `-> target` only works on links and new lines", short(&b.dir), i + 1, e.name));
-                        continue;
-                    }
-                    occ.entry(id).or_default().push((dst, target))
-                }
+                Some(id) if store.get(id).is_some() => occ.entry(id).or_default().push((dst, target)),
                 _ => creates.push((dst, parsed.1, target)),
             }
         }
