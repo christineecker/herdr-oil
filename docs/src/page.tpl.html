@@ -1,0 +1,595 @@
+<title>herdr-oil</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+/* Layout: a reading column for prose, full-width "terminal plates" for real captures of the TUI. */
+:root {
+  --bg: #edf1f0;
+  --surface: #ffffff;
+  --sunk: #e3e9e7;
+  --fg: #152120;
+  --muted: #566866;
+  --line: #cfd9d6;
+  --accent: #127481;
+  --accent-soft: #d6ecee;
+  --add: #24804a;
+  --ren: #8a6a00;
+  --mov: #5b4cc4;
+  --del: #b8154f;
+  --term-bg: #2a2a2a;
+  --term-chrome: #1e1e1e;
+  --term-fg: #f7f1ff;
+  --term-dim: #8e889a;
+  --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141918; --surface: #1b2120; --sunk: #111514; --fg: #e5ecea; --muted: #94a5a2; --line: #2b3533;
+    --accent: #4eaab7; --accent-soft: #17383c; --add: #7bd88f; --ren: #fce566; --mov: #a99ff0; --del: #fc618d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141918; --surface: #1b2120; --sunk: #111514; --fg: #e5ecea; --muted: #94a5a2; --line: #2b3533;
+  --accent: #4eaab7; --accent-soft: #17383c; --add: #7bd88f; --ren: #fce566; --mov: #a99ff0; --del: #fc618d;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font: 16px/1.6 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 72px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 72px; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--display); line-height: 1.08; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(2.8rem, 7vw, 5.2rem); font-weight: 800; letter-spacing: -0.03em; }
+h2 { font-size: clamp(1.6rem, 3.2vw, 2.3rem); font-weight: 700; }
+h3 { font-size: 1.15rem; font-weight: 700; }
+p { margin: 0; }
+a { color: var(--accent); }
+code, kbd, .mono { font-family: var(--mono); font-size: .88em; }
+kbd {
+  display: inline-block; padding: 1px 6px; border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: 5px; background: var(--surface); color: var(--fg); white-space: nowrap; line-height: 1.5;
+}
+.eyebrow { font: 600 .74rem/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+section { display: grid; gap: 24px; }
+.sec-head { display: grid; gap: 10px; }
+.sec-head p { color: var(--muted); max-width: 68ch; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* hero */
+header.hero { padding-top: 56px; display: grid; gap: 28px; }
+.hero .lede { font-size: clamp(1.1rem, 2vw, 1.35rem); max-width: 40ch; line-height: 1.45; }
+.hero .lede em { font-style: normal; color: var(--accent); font-family: var(--mono); font-size: .92em; }
+.hero-top { display: flex; flex-wrap: wrap; gap: 28px 48px; align-items: end; justify-content: space-between; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px; }
+.fact { font: 500 .82rem/1 var(--mono); padding: 8px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); display: inline-flex; gap: 8px; align-items: center; }
+.fact b { color: var(--accent); font-weight: 700; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--add); display: inline-block; }
+
+/* terminal plate */
+.plate { container-type: inline-size; border-radius: var(--radius); background: var(--term-bg); color: var(--term-fg); overflow: hidden; box-shadow: 0 18px 50px -24px rgba(0,0,0,.45); }
+.plate-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--term-chrome); font: 500 12px/1 var(--mono); color: var(--term-dim); }
+.plate-bar .lights { display: flex; gap: 6px; }
+.plate-bar .lights i { width: 10px; height: 10px; border-radius: 50%; background: #3a3a3a; display: block; }
+.plate-bar .ttl { color: var(--term-fg); }
+.plate pre { --cols: 120; margin: 0; padding: 10px 12px 12px; font: 400 clamp(8.5px, calc((100cqw - 24px) / (var(--cols) * 0.62)), 14px)/1.32 var(--mono); white-space: pre; overflow-x: auto; tab-size: 4; }
+.keys { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.keys .lbl { font: 600 .72rem/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+
+/* gallery */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+.tabs button {
+  font: 600 .9rem/1 var(--body); color: var(--muted); background: none; border: 0; padding: 10px 14px 12px;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer;
+}
+.tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tabs button:hover { color: var(--fg); }
+.shot-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; align-items: start; }
+.shot-meta p { color: var(--muted); max-width: 72ch; }
+.shot-meta .n { font: 600 .8rem/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* simulator */
+.sim { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; display: grid; gap: 12px; align-content: start; min-width: 0; }
+.panel-h { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.rows { display: grid; gap: 4px; }
+.row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.row .mk { font: 700 .95rem/1 var(--mono); text-align: center; }
+.row input {
+  font: 500 .92rem/1 var(--mono); padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--sunk); color: var(--fg); width: 100%; min-width: 0;
+}
+.row input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+.row .acts { display: flex; gap: 4px; }
+.btn {
+  font: 600 .78rem/1 var(--mono); padding: 7px 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+.btn.primary:hover { color: var(--surface); filter: brightness(1.08); }
+.sim-tools { display: flex; flex-wrap: wrap; gap: 6px; }
+.ops { display: grid; gap: 6px; font: 500 .9rem/1.4 var(--mono); }
+.op { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.op .tag { font-weight: 700; font-size: .78rem; letter-spacing: .06em; }
+.op .path { overflow-wrap: anywhere; }
+.t-create { color: var(--add); } .t-rename { color: var(--ren); } .t-move, .t-copy { color: var(--mov); } .t-delete, .t-err { color: var(--del); }
+.empty { color: var(--muted); font-style: italic; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font: 500 .8rem/1 var(--mono); color: var(--muted); }
+
+/* rules + phases */
+.rules { width: 100%; border-collapse: collapse; font-size: .95rem; }
+.rules th, .rules td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.rules th { font: 600 .72rem/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.tbl { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.phases { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; counter-reset: ph; }
+.phase { border-top: 3px solid var(--accent); padding-top: 14px; display: grid; gap: 6px; align-content: start; }
+.phase .num { font: 700 .8rem/1 var(--mono); color: var(--accent); }
+.phase p { color: var(--muted); font-size: .95rem; }
+
+/* keys */
+.keygrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.keylist { display: grid; gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.keylist h3 { padding: 14px 16px 10px; font-size: 1rem; }
+.kv { display: grid; grid-template-columns: minmax(120px, 38%) minmax(0, 1fr); gap: 12px; padding: 8px 16px; border-top: 1px solid var(--line); font-size: .92rem; align-items: baseline; }
+.kv .k { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* review notes */
+.notes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.note { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: var(--radius); padding: 16px 18px; display: grid; gap: 6px; align-content: start; }
+.note.decide { border-left-color: var(--ren); }
+.note.limit { border-left-color: var(--del); }
+.note.ok { border-left-color: var(--add); }
+.note .tag { font: 700 .7rem/1 var(--mono); letter-spacing: .1em; text-transform: uppercase; }
+.note.decide .tag { color: var(--ren); } .note.limit .tag { color: var(--del); } .note.ok .tag { color: var(--add); }
+.note p { color: var(--muted); font-size: .95rem; }
+
+/* machine */
+.machine { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.cmd { position: relative; background: var(--term-bg); color: var(--term-fg); border-radius: var(--radius); padding: 14px 16px; font: 500 .85rem/1.55 var(--mono); overflow-x: auto; white-space: pre; margin: 0; }
+.cmd .c { color: var(--term-dim); }
+.copy { position: absolute; top: 8px; right: 8px; font: 600 .72rem/1 var(--mono); padding: 6px 8px; border-radius: 5px; border: 1px solid #444; background: #333; color: var(--term-fg); cursor: pointer; }
+.list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.list li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; }
+.list li::before { content: "✓"; color: var(--add); font-weight: 700; }
+.list li.todo::before { content: "→"; color: var(--accent); }
+
+/* tests */
+.tests { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.tgroup { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 8px; align-content: start; }
+.tgroup h3 { font: 700 .85rem/1 var(--mono); display: flex; justify-content: space-between; }
+.tgroup h3 span { color: var(--add); }
+.tgroup ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font: 400 .8rem/1.35 var(--mono); color: var(--muted); }
+.tgroup li::before { content: "ok "; color: var(--add); }
+
+/* source */
+.src { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; min-height: 560px; }
+.files { border-right: 1px solid var(--line); overflow-y: auto; max-height: 760px; background: var(--sunk); }
+.files button { display: grid; gap: 2px; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid var(--line); padding: 10px 14px; cursor: pointer; color: var(--fg); }
+.files button .fn { font: 600 .84rem/1.2 var(--mono); display: flex; justify-content: space-between; gap: 8px; }
+.files button .fn span { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.files button .rl { font-size: .76rem; color: var(--muted); line-height: 1.3; }
+.files button[aria-selected="true"] { background: var(--surface); box-shadow: inset 3px 0 0 var(--accent); }
+.code { overflow: auto; max-height: 760px; min-width: 0; }
+.code pre { margin: 0; padding: 14px 0; font: 400 .8rem/1.55 var(--mono); }
+.code .ln { display: grid; grid-template-columns: 52px minmax(0, 1fr); }
+.code .ln i { font-style: normal; color: var(--muted); opacity: .55; text-align: right; padding-right: 14px; user-select: none; font-variant-numeric: tabular-nums; }
+.code .ln span.l { white-space: pre; padding-right: 16px; }
+.src-tools { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.src-tools input { font: 500 .85rem/1 var(--mono); padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--sunk); color: var(--fg); min-width: 0; flex: 1 1 180px; }
+.src-main { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; }
+mark { background: var(--accent-soft); color: inherit; border-radius: 2px; }
+
+/* highlight.js tokens (theme-aware) */
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in { color: var(--del); }
+.hljs-string, .hljs-char, .hljs-regexp { color: var(--add); }
+.hljs-comment, .hljs-quote { color: var(--muted); font-style: italic; }
+.hljs-number, .hljs-literal { color: var(--mov); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--accent); }
+.hljs-type, .hljs-title.class_ { color: var(--ren); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-meta { color: var(--accent); }
+.hljs-punctuation, .hljs-operator { color: var(--fg); }
+
+footer { color: var(--muted); font-size: .9rem; border-top: 1px solid var(--line); padding-top: 20px; }
+
+@media (max-width: 860px) {
+  .sim, .keygrid, .notes, .machine, .phases { grid-template-columns: minmax(0, 1fr); }
+  .src { grid-template-columns: minmax(0, 1fr); }
+  .files { max-height: 220px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .shot-meta { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .plate pre { transition: opacity .18s ease; }
+}
+</style>
+
+<div class="wrap">
+
+<header class="hero">
+  <div class="hero-top">
+    <div style="display:grid;gap:18px">
+      <span class="eyebrow">herdr plugin · v0.1.0</span>
+      <h1>herdr-oil</h1>
+      <p class="lede">The directory listing is a text buffer. Rename, create, delete, move and copy by editing lines with vim keys, then <em>:w</em>. A fuzzy finder and live grep live in the same popup.</p>
+    </div>
+    <div class="facts" aria-label="Status">
+      <span class="fact"><b>__TESTCOUNT__</b> tests passing</span>
+      <span class="fact"><b>__LOC__</b> lines of Rust</span>
+      <span class="fact">macOS · Linux</span>
+    </div>
+  </div>
+  <figure class="plate" style="margin:0">
+    <div class="plate-bar"><span class="lights"><i></i><i></i><i></i></span><span class="ttl">Oil</span><span>~/atlas · pending edits, real capture</span></div>
+    <pre style="--cols: __HEROCOLS__">__HERO__</pre>
+  </figure>
+</header>
+
+<section id="install">
+  <div class="sec-head">
+    <span class="eyebrow">Install</span>
+    <h2>Link it, bind three keys</h2>
+    <p>Needs Rust (cargo). bat and ripgrep are optional; they power previews and grep when installed.</p>
+  </div>
+  <div class="machine">
+    <pre class="cmd" id="install-cmd"><button class="copy" type="button" data-copy="install-cmd">Copy</button><span class="c"># clone, then link (the build hook runs cargo build --release)</span>
+git clone https://github.com/OWNER/herdr-oil
+herdr plugin link "$PWD/herdr-oil"
+herdr server reload-config</pre>
+    <pre class="cmd" id="bindings"><button class="copy" type="button" data-copy="bindings">Copy</button><span class="c"># ~/.config/herdr/config.toml</span>
+[[keys.command]]
+key = "prefix+d"            <span class="c"># explorer</span>
+type = "plugin_action"
+command = "herdr-oil.explorer"
+
+[[keys.command]]
+key = "prefix+shift+f"      <span class="c"># fuzzy files</span>
+type = "plugin_action"
+command = "herdr-oil.finder"
+
+[[keys.command]]
+key = "prefix+slash"        <span class="c"># live grep</span>
+type = "plugin_action"
+command = "herdr-oil.grep"</pre>
+  </div>
+  <p class="prose" style="color:var(--muted)">Options go in <code>$(herdr plugin config-dir herdr-oil)/config.toml</code>. See <code>config.example.toml</code> for the editor, open target, Trash or permanent delete, and display settings.</p>
+</section>
+
+<section id="screens">
+  <div class="sec-head">
+    <span class="eyebrow">Screens</span>
+    <h2>One editing session, start to finish</h2>
+    <p>Captured from a herdr pane running the release binary against a sample project. The keys under each screen are exactly what was sent. Nerd Font icons are shown as simple glyphs here.</p>
+  </div>
+  <div class="tabs" role="tablist" id="shot-tabs"></div>
+  <div class="shot-meta">
+    <div style="display:grid;gap:8px;min-width:0">
+      <h3 id="shot-title"></h3>
+      <p id="shot-cap"></p>
+    </div>
+    <span class="n" id="shot-n"></span>
+  </div>
+  <figure class="plate" style="margin:0">
+    <div class="plate-bar"><span class="lights"><i></i><i></i><i></i></span><span class="ttl" id="shot-ttl">Oil</span><span id="shot-dim"></span></div>
+    <pre id="shot-pre"></pre>
+  </figure>
+  <div class="keys" id="shot-keys"></div>
+</section>
+
+<section id="try">
+  <div class="sec-head">
+    <span class="eyebrow">Try the model</span>
+    <h2>Edit the lines, watch the plan</h2>
+    <p>Each line carries a hidden id, as in oil.nvim. This is the same rule set the planner uses, reduced to one directory. Type in the boxes, duplicate a line, delete one, add a new one.</p>
+  </div>
+  <div class="sim">
+    <div class="panel">
+      <div class="panel-h"><h3>~/atlas/</h3><span class="legend"><span class="t-create">+ new</span><span class="t-rename">~ renamed</span><span class="t-copy">⧉ copy</span></span></div>
+      <div class="rows" id="rows"></div>
+      <div class="sim-tools">
+        <button class="btn" type="button" id="add">o  new line</button>
+        <button class="btn" type="button" id="reset">:e!  reset</button>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-h"><h3>:w would do</h3><span class="eyebrow" id="opcount"></span></div>
+      <div class="ops" id="ops"></div>
+    </div>
+  </div>
+</section>
+
+<section id="apply">
+  <div class="sec-head">
+    <span class="eyebrow">How :w works</span>
+    <h2>Diff every buffer, then apply in three phases</h2>
+    <p>Edits from all visited directories are planned together. Validation runs first, so a clash stops the save before any file moves.</p>
+  </div>
+  <div class="tbl">
+    <table class="rules">
+      <thead><tr><th>Where the entry's id appears now</th><th>Operation</th></tr></thead>
+      <tbody>
+        <tr><td>nowhere</td><td><span class="t-delete mono">DELETE</span> to the Trash, or permanently if configured</td></tr>
+        <tr><td>at its original path, plus other places</td><td>kept; every other place is a <span class="t-copy mono">COPY</span></td></tr>
+        <tr><td>only somewhere else</td><td>first place is a <span class="t-move mono">MOVE</span> (same folder shows as RENAME), the rest are copies</td></tr>
+        <tr><td>a line with no id</td><td><span class="t-create mono">CREATE</span>; a trailing <code>/</code> makes a directory, <code>a/b/c.txt</code> creates parents</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="phases">
+    <div class="phase"><span class="num">PHASE 1</span><h3>Copy into staging</h3><p>Copies are made first, while every source is still untouched, into hidden staging names.</p></div>
+    <div class="phase"><span class="num">PHASE 2</span><h3>Moves and deletes, deepest first</h3><p>A moved entry is parked inside the nearest folder that never moves. That makes swaps, case-only renames and "move the child out, delete the parent" safe.</p></div>
+    <div class="phase"><span class="num">PHASE 3</span><h3>Land, shallowest first</h3><p>Creates and staged entries land at their final paths, re-rooted under folders that were renamed. An occupied path is reported and the entry is put back.</p></div>
+  </div>
+  <p class="prose" style="color:var(--muted)">Validation rejects two lines with the same name, a name that already exists and is not being vacated, moving a folder into itself, absolute paths, and an id line that was emptied. On macOS names are compared case-insensitively, which is how the session above caught <code>DESIGN.md</code> landing next to <code>design.md</code>.</p>
+</section>
+
+<section id="keys">
+  <div class="sec-head">
+    <span class="eyebrow">Keys</span>
+    <h2>Vim in the explorer, fzf in the finder</h2>
+    <p><kbd>g?</kbd> inside the popup shows the full sheet.</p>
+  </div>
+  <div class="keygrid" id="keygrid"></div>
+</section>
+
+<section id="review">
+  <div class="sec-head">
+    <span class="eyebrow">Design notes</span>
+    <h2>Defaults worth knowing, and current limits</h2>
+  </div>
+  <div class="notes">
+    <div class="note decide"><span class="tag">Decision</span><h3>Enter types into your shell pane</h3><p>The default <code>open = "auto"</code> types <code>$EDITOR file</code> into the pane you opened the popup from, but only when that pane has no agent and only a shell in the foreground. Otherwise it opens a split to the right. Set <code>open = "split"</code> if you never want typing.</p></div>
+    <div class="note decide"><span class="tag">Decision</span><h3>Keybindings</h3><p>The suggested <kbd>prefix d</kbd>, <kbd>prefix ⇧F</kbd> and <kbd>prefix /</kbd> are free in herdr’s defaults. If a key does nothing, a built-in action on the same chord wins; set that built-in to <code>""</code> in <code>[keys]</code>.</p></div>
+    <div class="note decide"><span class="tag">Decision</span><h3>Splits close with the editor</h3><p>Split and tab targets run <code>exec $EDITOR</code>, so quitting the editor closes the pane. Typing into the origin pane does not use exec.</p></div>
+    <div class="note decide"><span class="tag">Decision</span><h3>Confirm dialog stays on</h3><p>Every save is reviewed by default. <code>confirm = false</code> skips it, except when something would be deleted.</p></div>
+    <div class="note limit"><span class="tag">Limit</span><h3>No undo for applied changes</h3><p><kbd>u</kbd> undoes buffer edits only. Deleted files can be restored from the Trash; renames and moves have no history.</p></div>
+    <div class="note limit"><span class="tag">Limit</span><h3>Relative symlinks keep their target text</h3><p>Moving a relative symlink into another folder does not rewrite it, so it can break. The <code>DESIGN.md</code> move in the screens is an example.</p></div>
+    <div class="note limit"><span class="tag">Limit</span><h3>Screens come from a regular pane</h3><p>herdr gives popups no readable pane id, so the captures were taken in a normal herdr pane running the same binary.</p></div>
+    <div class="note ok"><span class="tag">Checked</span><h3>Tested against real directories</h3><p>The planner and apply engine tests run on temporary folders: swaps, case-only renames, nested renames, recursive copies with symlinks, and no leftover staging files.</p></div>
+  </div>
+</section>
+
+<section id="tests">
+  <div class="sec-head">
+    <span class="eyebrow">cargo test</span>
+    <h2>__TESTCOUNT__ tests, all passing</h2>
+  </div>
+  <div class="tests" id="testgrid"></div>
+</section>
+
+<section id="source">
+  <div class="sec-head">
+    <span class="eyebrow">Source</span>
+    <h2>Read the code</h2>
+    <p>Every file in the plugin, in reading order. Search filters to lines that contain the text.</p>
+  </div>
+  <div class="src">
+    <div class="files" role="tablist" id="files"></div>
+    <div class="src-main">
+      <div class="src-tools">
+        <strong class="mono" id="src-name"></strong>
+        <input id="src-q" type="search" placeholder="filter lines…" aria-label="Filter lines">
+      </div>
+      <div class="code" id="code"></div>
+    </div>
+  </div>
+</section>
+
+<footer>Built for herdr 0.9.5 on macOS. Rust, ratatui 0.30, nucleo, ignore; previews through bat and search through ripgrep when installed.</footer>
+</div>
+
+<script id="data" type="application/json">/*__DATA__*/null</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha384-F/bZzf7p3Joyp5psL90p/p89AZJsndkSoGwRpXcZhleCWhd8SnRuoYo4d0yirjJp" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/rust.min.js" integrity="sha384-h29HWMYGysZp5v7HMfLgfj7PMRyj5l0/KqKdXWYxGfcfh4GxKPNGM/Ria90QFqoZ" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var DATA = JSON.parse(document.getElementById("data").textContent);
+  function el(tag, attrs, html) {
+    var e = document.createElement(tag);
+    if (attrs) for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (html != null) e.innerHTML = html;
+    return e;
+  }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function kbds(s) { return s.split(" ").filter(Boolean).map(function (k) { return "<kbd>" + esc(k) + "</kbd>"; }).join(" "); }
+
+  // ── screens ──
+  var tabs = document.getElementById("shot-tabs");
+  function showShot(i) {
+    var s = DATA.screens[i];
+    Array.prototype.forEach.call(tabs.children, function (b, j) { b.setAttribute("aria-selected", j === i ? "true" : "false"); b.tabIndex = j === i ? 0 : -1; });
+    document.getElementById("shot-title").textContent = s.title;
+    document.getElementById("shot-cap").textContent = s.caption;
+    document.getElementById("shot-n").textContent = (i + 1) + " / " + DATA.screens.length;
+    document.getElementById("shot-ttl").textContent = /finder|grep/i.test(s.key) ? "Find" : "Oil";
+    var pre = document.getElementById("shot-pre");
+    pre.style.setProperty("--cols", s.cols);
+    pre.innerHTML = s.html;
+    document.getElementById("shot-dim").textContent = s.cols + " × " + s.rows;
+    document.getElementById("shot-keys").innerHTML = '<span class="lbl">keys sent</span>' + s.keys.map(function (k) { return '<span style="display:inline-flex;gap:3px;margin-right:10px">' + kbds(k) + "</span>"; }).join("");
+  }
+  DATA.screens.forEach(function (s, i) {
+    var b = el("button", { role: "tab", type: "button", "aria-selected": "false" }, esc(s.tab));
+    b.addEventListener("click", function () { showShot(i); });
+    b.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        var n = (i + (e.key === "ArrowRight" ? 1 : DATA.screens.length - 1)) % DATA.screens.length;
+        showShot(n); tabs.children[n].focus();
+      }
+    });
+    tabs.appendChild(b);
+  });
+  showShot(0);
+
+  // ── simulator ──
+  var ORIG = [
+    { id: 1, name: "docs/" }, { id: 2, name: "src/" }, { id: 3, name: "Cargo.toml" },
+    { id: 4, name: "LICENSE" }, { id: 5, name: "README.md" }, { id: 6, name: "todo.txt" }
+  ];
+  var rows;
+  function reset() {
+    // example state: LICENSE duplicated, README renamed, todo.txt deleted, notes/ new
+    rows = [{ id: 1, text: "docs/" }, { id: 2, text: "src/" }, { id: 3, text: "Cargo.toml" }, { id: 4, text: "LICENSE" },
+            { id: 4, text: "LICENSE-APACHE" }, { id: 5, text: "INTRO.md" }, { id: null, text: "notes/" }];
+    render();
+  }
+  function norm(t) { return t.trim().replace(/\/+$/, ""); }
+  function origOf(id) { for (var i = 0; i < ORIG.length; i++) if (ORIG[i].id === id) return ORIG[i]; return null; }
+  function plan() {
+    var ops = [], errs = [], occ = {};
+    rows.forEach(function (r, i) {
+      if (!r.text.trim()) { if (r.id != null) errs.push("line " + (i + 1) + " is empty, use dd to delete it"); return; }
+      if (/^[\/~]/.test(r.text.trim())) { errs.push(r.text.trim() + ": absolute paths are not allowed"); return; }
+      if (r.id == null) return;
+      (occ[r.id] = occ[r.id] || []).push(norm(r.text) + (origOf(r.id).name.slice(-1) === "/" ? "/" : ""));
+    });
+    var tags = {};
+    ORIG.forEach(function (o) {
+      var spots = occ[o.id] || [];
+      if (!spots.length) { ops.push(["DELETE", o.name + "   (to Trash)", "delete"]); return; }
+      var keep = spots.indexOf(o.name) >= 0, first = true;
+      spots.forEach(function (s) {
+        if (s === o.name) return;
+        if (!keep && first) { ops.push(["RENAME", o.name + "  →  " + s, "rename"]); tags[s] = "~"; first = false; }
+        else { ops.push(["COPY", o.name + "  →  " + s, "copy"]); tags[s] = "⧉"; }
+      });
+    });
+    rows.forEach(function (r) {
+      if (r.id == null && r.text.trim()) { var n = r.text.trim(); ops.unshift(["CREATE", n, "create"]); tags[n.replace(/\/+$/, "") + (n.slice(-1) === "/" ? "/" : "")] = "+"; }
+    });
+    var seen = {};
+    rows.forEach(function (r) {
+      var k = norm(r.text).toLowerCase(); if (!k) return;
+      if (seen[k]) errs.push(norm(r.text) + ": two entries would get this name"); seen[k] = 1;
+    });
+    return { ops: ops, errs: errs, tags: tags };
+  }
+  function render() {
+    var p = plan(), box = document.getElementById("rows");
+    box.innerHTML = "";
+    rows.forEach(function (r, i) {
+      var t = r.text.trim();
+      var key = r.id != null ? norm(t) + (origOf(r.id).name.slice(-1) === "/" ? "/" : "") : t;
+      var mk = r.id == null ? (t ? "+" : "") : (p.tags[key] || "");
+      var cls = { "+": "t-create", "~": "t-rename", "⧉": "t-copy" }[mk] || "";
+      var row = el("div", { "class": "row" });
+      row.appendChild(el("span", { "class": "mk " + cls, "aria-hidden": "true" }, mk));
+      var inp = el("input", { type: "text", id: "sim-" + i, value: r.text, "aria-label": "line " + (i + 1) + (r.id ? " (id " + r.id + ")" : " (new)"), spellcheck: "false", autocomplete: "off" });
+      inp.addEventListener("input", function () { r.text = inp.value; var pos = inp.selectionStart; render(); var n = document.getElementById("sim-" + i); n.focus(); n.setSelectionRange(pos, pos); });
+      row.appendChild(inp);
+      var acts = el("span", { "class": "acts" });
+      var yy = el("button", { "class": "btn", type: "button", title: "yank and paste below (copy)" }, "yyp");
+      yy.addEventListener("click", function () { rows.splice(i + 1, 0, { id: r.id, text: r.text }); render(); });
+      var dd = el("button", { "class": "btn", type: "button", title: "delete line" }, "dd");
+      dd.addEventListener("click", function () { rows.splice(i, 1); render(); });
+      acts.appendChild(yy); acts.appendChild(dd);
+      row.appendChild(acts);
+      box.appendChild(row);
+    });
+    var ops = document.getElementById("ops");
+    ops.innerHTML = "";
+    if (p.errs.length) {
+      p.errs.forEach(function (e) { ops.appendChild(el("div", { "class": "op" }, '<span class="tag t-err">ERROR</span><span class="path">' + esc(e) + "</span>")); });
+      document.getElementById("opcount").textContent = "save blocked";
+      return;
+    }
+    if (!p.ops.length) ops.appendChild(el("div", { "class": "empty" }, "no changes"));
+    p.ops.forEach(function (o) { ops.appendChild(el("div", { "class": "op" }, '<span class="tag t-' + o[2] + '">' + o[0] + '</span><span class="path">' + esc(o[1]) + "</span>")); });
+    document.getElementById("opcount").textContent = p.ops.length + " change" + (p.ops.length === 1 ? "" : "s");
+  }
+  document.getElementById("add").addEventListener("click", function () { rows.push({ id: null, text: "" }); render(); var n = document.getElementById("sim-" + (rows.length - 1)); if (n) n.focus(); });
+  document.getElementById("reset").addEventListener("click", reset);
+  reset();
+
+  // ── keys ──
+  var KEYS = [
+    ["Explorer: navigate and open", [["⏎", "open file, enter folder"], ["- ⌫", "parent folder"], ["_ ~", "start folder, home"], ["^v ^x ^t", "open in split right, below, new tab"], ["^e", "edit inside the popup"], ["gx gy", "system app, copy path"], ["g. gs gd ^p", "hidden, sort, details, preview"], ["⇥", "switch to the finder"], ["q ZZ ZQ", "quit, apply and quit, discard and quit"]]],
+    ["Explorer: edit = file operations", [["cw ciw cin can", "rename (cin is the stem, can the extension)"], ["o O", "new line creates a file, name/ a folder"], ["dd 3dd V…d", "delete"], ["dd, - , p", "cut and paste elsewhere moves"], ["yy p", "duplicate copies"], ["u ^r", "undo, redo"], [":w ^s", "review and apply"], [":touch a b", "add several files"], [":cd ~/x :sort mtime", "jump, sort"]]],
+    ["Finder", [["type", "fuzzy query: 'exact ^prefix suffix$ !not"], ["⇥ ⇧⇥", "Files, Dirs, Grep, Recent"], ["⏎ ^v ^x ^t ^e", "open with the default, split, below, tab, popup"], ["^o", "reveal in the explorer"], ["^space", "mark several, ⏎ opens all"], ["^r", "root: cwd, repository, parent"], ["alt-h alt-i alt-p", "hidden, ignored, preview"], ["^y", "copy path"], ["esc", "back to the explorer"]]],
+    ["Vim support", [["h j k l w b e", "motions with counts"], ["0 ^ $ gg G 12G", "line positions"], ["f F t T ;", "find character"], ["d c y + motion", "operators, iw aw iW aW in an"], ["x X s S C D r J ~", "single-key edits"], ["V", "visual line: d y c u U"], ["/text n N", "search"], [":w :q :q! :wq :e!", "ex commands"]]]
+  ];
+  var kg = document.getElementById("keygrid");
+  KEYS.forEach(function (sec) {
+    var box = el("div", { "class": "keylist" });
+    box.appendChild(el("h3", null, esc(sec[0])));
+    sec[1].forEach(function (kv) { box.appendChild(el("div", { "class": "kv" }, '<span class="k">' + kbds(kv[0]) + "</span><span>" + esc(kv[1]) + "</span>")); });
+    kg.appendChild(box);
+  });
+
+  // ── tests ──
+  var tg = document.getElementById("testgrid");
+  Object.keys(DATA.tests).forEach(function (m) {
+    var g = el("div", { "class": "tgroup" });
+    g.appendChild(el("h3", null, esc(m) + ".rs <span>" + DATA.tests[m].length + "</span>"));
+    var ul = el("ul");
+    DATA.tests[m].forEach(function (t) { ul.appendChild(el("li", null, esc(t))); });
+    g.appendChild(ul);
+    tg.appendChild(g);
+  });
+
+  // ── source ──
+  var files = document.getElementById("files"), code = document.getElementById("code"), q = document.getElementById("src-q");
+  var cur = 0, cache = {};
+  function hl(f) {
+    if (cache[f.name]) return cache[f.name];
+    var out;
+    try {
+      if (window.hljs && hljs.getLanguage(f.lang)) out = hljs.highlight(f.code, { language: f.lang, ignoreIllegals: true }).value;
+    } catch (e) { out = null; }
+    if (!out) out = esc(f.code);
+    // split highlighted html into lines, re-opening spans that cross line breaks
+    var lines = [], open = [], buf = "", re = /(<span[^>]*>|<\/span>|\n)/g, last = 0, m;
+    while ((m = re.exec(out))) {
+      buf += out.slice(last, m.index); last = re.lastIndex;
+      if (m[0] === "\n") { lines.push(buf + "</span>".repeat(open.length)); buf = open.join(""); }
+      else if (m[0] === "</span>") { open.pop(); buf += m[0]; }
+      else { open.push(m[0]); buf += m[0]; }
+    }
+    buf += out.slice(last); lines.push(buf);
+    cache[f.name] = lines;
+    return lines;
+  }
+  function showFile(i) {
+    cur = i;
+    var f = DATA.sources[i];
+    Array.prototype.forEach.call(files.children, function (b, j) { b.setAttribute("aria-selected", j === i ? "true" : "false"); });
+    document.getElementById("src-name").textContent = f.name;
+    var lines = hl(f), raw = f.code.split("\n"), needle = q.value.trim().toLowerCase();
+    var html = [];
+    for (var n = 0; n < lines.length; n++) {
+      if (needle && raw[n].toLowerCase().indexOf(needle) < 0) continue;
+      html.push('<div class="ln"><i>' + (n + 1) + '</i><span class="l">' + (lines[n] || " ") + "</span></div>");
+    }
+    code.innerHTML = "<pre>" + (html.join("") || '<div class="ln"><i></i><span class="l empty">no matching lines</span></div>') + "</pre>";
+  }
+  DATA.sources.forEach(function (f, i) {
+    var b = el("button", { role: "tab", type: "button" }, '<span class="fn">' + esc(f.name) + "<span>" + f.lines + '</span></span><span class="rl">' + esc(f.role) + "</span>");
+    b.addEventListener("click", function () { showFile(i); code.scrollTop = 0; });
+    files.appendChild(b);
+  });
+  q.addEventListener("input", function () { showFile(cur); });
+  window.addEventListener("load", function () { cache = {}; showFile(cur); });
+  showFile(0);
+
+  // ── copy ──
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var pre = document.getElementById(b.getAttribute("data-copy"));
+      var text = pre.innerText.replace(/^Copy\n?/, "");
+      var done = function () { b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1400); };
+      try {
+        navigator.clipboard.writeText(text).then(done, function () { select(pre); });
+      } catch (e) { select(pre); }
+    });
+  });
+  function select(node) { var r = document.createRange(); r.selectNodeContents(node); var s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+})();
+</script>

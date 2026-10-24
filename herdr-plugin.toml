@@ -1,0 +1,57 @@
+# herdr-oil — an oil.nvim-style file explorer for herdr: the directory
+# listing is a text buffer you edit with vim keys (rename = edit the line,
+# delete = dd, create = o + name, move = dd + paste elsewhere, copy = yy + p);
+# :w shows the plan and applies it. Plus a fuzzy finder (files, dirs, live
+# grep, recent) with previews. Both open in a popup like herdr-hop.
+#
+# Install (local checkout):  herdr plugin link /path/to/herdr-oil
+# Bind the actions in config.toml (see README).
+
+id = "herdr-oil"
+name = "Oil"
+version = "0.1.0"
+description = "oil.nvim-style editable file explorer + fuzzy finder / live grep popup."
+min_herdr_version = "0.9.3"
+platforms = ["macos", "linux"]
+
+[[build]]
+platforms = ["linux", "macos"]
+command = ["/bin/sh", "scripts/build.sh"]
+
+# The popup. Opened by the launcher actions below, which pass the focused
+# pane's cwd and id with --env (HERDR_OIL_ROOT / HERDR_OIL_ORIGIN / HERDR_OIL_MODE).
+[[panes]]
+id = "oil"
+title = "Oil"
+placement = "popup"
+width = "82%"
+height = "78%"
+command = ["./target/release/herdr-oil"]
+
+[[actions]]
+id = "explorer"
+title = "Oil: explore directory…"
+description = "Editable directory listing of the focused pane's cwd (oil.nvim style)."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "explorer"]
+
+[[actions]]
+id = "finder"
+title = "Oil: find files…"
+description = "Fuzzy file finder rooted at the focused pane's cwd."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "finder"]
+
+[[actions]]
+id = "grep"
+title = "Oil: live grep…"
+description = "Search file contents (ripgrep) under the focused pane's cwd."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "grep"]
+
+[[actions]]
+id = "recent"
+title = "Oil: recent files…"
+description = "Files recently opened through herdr-oil."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "recent"]

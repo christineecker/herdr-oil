@@ -1,0 +1,24 @@
+# $(herdr plugin config-dir herdr-oil)/config.toml — every key is optional.
+
+# Editor command; default $VISUAL, then $EDITOR, then nvim. Args allowed.
+# editor = "nvim"
+
+# What Enter does with a file:
+#   "auto"        type `$EDITOR file` into the pane you came from when it sits
+#                 at a shell prompt, else open a split to its right (default)
+#   "popup"       edit inside the popup, return to the explorer afterwards
+#   "split" | "split-down" | "tab" | "system"
+# open = "auto"
+
+# "trash" (default: ~/.Trash on macOS, XDG trash on Linux) or "permanent".
+# delete = "trash"
+
+# show_hidden = false
+# details = "size"       # "size" (default), "full" = perms + size + age, "off"; gd cycles
+# preview = false        # preview pane in the explorer (toggle: ctrl-p)
+# icons = true           # needs a Nerd Font
+# git_status = true      # M/A/?/! markers per entry
+# confirm = true         # review dialog before applying (always on for deletes)
+# stay_open = false      # keep the popup after handing a file to a split/tab
+# respect_ignore = true  # finder honours .gitignore (toggle: alt-i)
+# max_files = 200000     # finder walk cap

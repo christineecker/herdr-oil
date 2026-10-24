@@ -1,0 +1,25 @@
+[package]
+name = "herdr-oil"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "oil.nvim-style editable file explorer + fuzzy finder popup for herdr"
+license = "MIT"
+
+[[bin]]
+name = "herdr-oil"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+unicode-width = "0.2"
+nucleo = "0.5"
+ignore = "0.4"
+
+[profile.release]
+opt-level = 2
+strip = true
