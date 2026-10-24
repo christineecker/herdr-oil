@@ -19,6 +19,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 unicode-width = "0.2"
 nucleo = "0.5"
 ignore = "0.4"
+regex = "1"
 
 [profile.release]
 opt-level = 2

@@ -1,7 +1,7 @@
 //! herdr-oil: an oil.nvim-style file explorer and fuzzy finder for herdr.
 //!
 //!   herdr-oil                    run the TUI (dir from $HERDR_OIL_ROOT, else cwd)
-//!   herdr-oil --launch MODE      open the popup for the focused pane (explorer|finder|grep|recent)
+//!   herdr-oil --launch MODE      open the popup for the focused pane (explorer|finder|grep|recent|git)
 //!   herdr-oil [DIR|FILE]         explore DIR (or FILE's directory, cursor on it)
 //!   herdr-oil --finder|--grep    start in the finder
 //!   herdr-oil --pick             print the chosen file(s) to stdout instead of opening
@@ -26,8 +26,8 @@ use std::path::PathBuf;
 
 fn usage() {
     println!(
-        "herdr-oil {}\n\nusage: herdr-oil [--launch MODE] [--finder|--grep|--recent] [--pick] [DIR|FILE]\n\n\
-         MODE: explorer (default), finder, grep, recent",
+        "herdr-oil {}\n\nusage: herdr-oil [--launch MODE] [--finder|--grep|--recent|--git] [--pick] [DIR|FILE]\n\n\
+         MODE: explorer (default), finder, grep, recent, git",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -51,6 +51,7 @@ fn main() {
             "--finder" | "--files" => mode = "finder".into(),
             "--grep" => mode = "grep".into(),
             "--recent" => mode = "recent".into(),
+            "--git" => mode = "git".into(),
             "--pick" => pick = true,
             "--version" | "-V" => {
                 println!("herdr-oil {}", env!("CARGO_PKG_VERSION"));

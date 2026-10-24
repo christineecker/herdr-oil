@@ -14,7 +14,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use std::path::Path;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Terminal cells taken by `c` (wide CJK / emoji count double).
+fn cw(c: char) -> usize {
+    c.width().unwrap_or(0)
+}
 
 pub fn icon_color(th: &Theme, c: IconColor) -> Color {
     match c {
@@ -72,6 +77,19 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let pending = if modified.is_empty() { None } else { Some(plan::build(app.buffers.values(), &app.store)) };
     let mut tags: HashMap<String, char> = HashMap::new();
     let mut summary: Vec<Span> = Vec::new();
+    // entries leaving this directory, listed under the buffer
+    let (mut gone, mut moved_out): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    if let Some(p) = &pending {
+        for op in &p.ops {
+            let here = |q: &Path| q.parent() == Some(app.cwd.as_path());
+            let label = |q: &Path, dir: bool| format!("{}{}", q.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), if dir { "/" } else { "" });
+            match op {
+                Op::Delete { src, dir } if here(src) => gone.push(label(src, *dir)),
+                Op::Move { src, dst, dir } if here(src) && !here(dst) => moved_out.push(label(src, *dir)),
+                _ => {}
+            }
+        }
+    }
     if let Some(p) = &pending {
         let (mut c, mut r, mut m, mut cp, mut d) = (0, 0, 0, 0, 0);
         for op in &p.ops {
@@ -94,6 +112,14 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
                     tags.insert(plan::key(dst), '⧉');
                 }
                 Op::Delete { .. } => d += 1,
+                Op::Link { dst, .. } => {
+                    c += 1;
+                    tags.insert(plan::key(dst), '+');
+                }
+                Op::Retarget { path, .. } => {
+                    r += 1;
+                    tags.entry(plan::key(path)).or_insert('~');
+                }
             }
         }
         for (n, sym, col) in [(c, "+", th.green), (r, "~", th.yellow), (m, "→", th.blue), (cp, "⧉", th.blue), (d, "−", th.red)] {
@@ -114,8 +140,9 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     let right = format!(
-        "{}{}{} ",
+        "{}{}{}{} ",
         app.sort.label(),
+        if app.store.reverse { " ↕" } else { "" },
         if app.hidden { " · hidden" } else { "" },
         if app.details == 2 { " · details" } else { "" }
     );
@@ -153,6 +180,37 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     } else {
         list
     };
+    // footer row naming what this directory loses on :w
+    let list_inner = if (gone.len() + moved_out.len()) > 0 && list_inner.height > 3 {
+        let [rows, foot] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(list_inner);
+        let mut fs = vec![Span::styled(" ", Style::default())];
+        for (v, sym, verb, col) in [(&gone, "−", "deleted", th.red), (&moved_out, "→", "moved out", th.blue)] {
+            if v.is_empty() {
+                continue;
+            }
+            fs.push(Span::styled(format!("{sym} {} {verb}: ", v.len()), Style::default().fg(col).add_modifier(Modifier::BOLD)));
+            fs.push(Span::styled(format!("{}   ", v.join(", ")), Style::default().fg(col).add_modifier(Modifier::DIM | Modifier::CROSSED_OUT)));
+        }
+        let used: usize = fs.iter().map(|s| s.content.width()).sum();
+        let w = foot.width as usize;
+        let mut line = Line::from(fs);
+        if used > w {
+            // keep it on one row
+            let mut out = Vec::new();
+            let mut left = w.saturating_sub(1);
+            for sp in line.spans {
+                let t: String = sp.content.chars().scan(0, |acc, c| { *acc += cw(c); (*acc <= left).then_some(c) }).collect();
+                left = left.saturating_sub(t.width());
+                out.push(Span::styled(t, sp.style));
+            }
+            out.push(Span::styled("…", Style::default().fg(th.dim)));
+            line = Line::from(out);
+        }
+        f.render_widget(Paragraph::new(line).style(Style::default().bg(th.surface)), foot);
+        rows
+    } else {
+        list_inner
+    };
     app.list_area = list_inner;
     let mode = app.vim.mode.clone();
     let (details, icons) = (app.details, app.cfg.icons);
@@ -175,13 +233,14 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let empty_dir = b.lines.len() == 1 && !b.lines[0].significant() && b.error.is_none();
     for (i, l) in b.lines.iter().enumerate().skip(b.scroll).take(list_inner.height as usize) {
         let entry = l.id.and_then(|id| store.get(id));
-        let name_now = l.text.trim().trim_end_matches('/');
+        let name_now = l.name();
+        let (_, link_now) = plan::split_link(&l.text);
         // change marker, straight from the plan
-        let untouched = entry.is_some_and(|e| e.name == name_now && e.path.parent() == Some(b.dir.as_path()));
+        let untouched = entry.is_some_and(|e| e.name == name_now && e.path.parent() == Some(b.dir.as_path()) && link_now.map_or(true, |t| Some(t) == e.link_target.as_deref()));
         let (mark, mcol) = if !l.significant() || (untouched && original.contains(&l.id.unwrap_or(0))) {
             (" ", th.dim)
         } else {
-            match plan::parse_name(&l.text) {
+            match plan::parse_name(plan::split_link(&l.text).0) {
                 Err(_) => ("!", th.red),
                 Ok(None) => (" ", th.dim),
                 Ok(Some((rel, _))) => match tags.get(&plan::key(&plan::normalize(&b.dir.join(rel)))) {
@@ -227,11 +286,15 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
             Kind::File => Style::default().fg(th.text),
         };
         let base = if gitc == Some('!') { base.add_modifier(Modifier::DIM) } else { base };
-        // details (right side, virtual)
+        // virtual text: where a renamed / moved / copied line came from, a
+        // symlink's target, and the details column on the right
+        let mut after = Vec::new();
         let mut tail = Vec::new();
         if let Some(e) = entry {
-            if let Some(t) = &e.link_target {
-                tail.push(Span::styled(format!(" → {t}"), Style::default().fg(th.dim)));
+            if matches!(mark, "~" | "→" | "⧉") {
+                let from = if e.path.parent() == Some(b.dir.as_path()) { e.display() } else { tilde(&e.path) + if e.kind.is_dir() { "/" } else { "" } };
+                let sym = if mark == "⧉" { "⧉" } else { "←" };
+                after.push(Span::styled(format!("  {sym} {from}"), Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
             }
             let size = entry::size_label(e);
             // big files stand out: K/B dim, M subtext, G+ peach
@@ -248,19 +311,28 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
                 tail.push(Span::styled(format!("  {size:>9}"), Style::default().fg(scol)));
             }
         }
-        let tail_w: usize = tail.iter().map(|s| s.content.width()).sum();
         let avail = w.saturating_sub(used + 1).max(4);
         let chars: Vec<char> = l.text.chars().collect();
         let is_cur = i == b.row;
-        // horizontal scroll for the cursor line
+        // horizontal scroll for the cursor line, in display cells
         let mut off = 0;
         if is_cur {
-            if b.col >= avail {
-                off = b.col + 1 - avail;
+            let col = b.col.min(chars.len());
+            let need = |o: usize| chars[o..col].iter().map(|c| cw(*c)).sum::<usize>() + chars.get(col).map(|c| cw(*c)).unwrap_or(1);
+            while off < col && need(off) > avail {
+                off += 1;
             }
             b.hscroll = off;
         }
-        let shown: Vec<char> = chars.iter().skip(off).take(avail).copied().collect();
+        let mut shown: Vec<char> = Vec::new();
+        let mut text_w = 0;
+        for &c in chars.iter().skip(off) {
+            if text_w + cw(c) > avail {
+                break;
+            }
+            text_w += cw(c);
+            shown.push(c);
+        }
         let in_vis = vis.is_some_and(|(a, z)| i >= a && i <= z);
         let row_bg = if in_vis {
             Some(th.surface)
@@ -269,36 +341,56 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
         } else {
             None
         };
-        if is_cur && matches!(mode, Mode::Normal) {
-            let c = b.col.saturating_sub(off);
-            let pre: String = shown.iter().take(c).collect();
-            let at: String = shown.get(c).map(|x| x.to_string()).unwrap_or_else(|| " ".into());
-            let post: String = shown.iter().skip(c + 1).collect();
-            spans.push(Span::styled(pre, base));
-            spans.push(Span::styled(at, base.add_modifier(Modifier::REVERSED)));
-            spans.push(Span::styled(post, base));
-        } else {
-            let s: String = shown.iter().collect();
-            if empty_dir && i == 0 && !matches!(mode, Mode::Insert) {
-                spans.push(Span::styled("(empty — o to add a file, name/ for a dir)", Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
-            } else {
-                spans.push(Span::styled(s, base));
+        if empty_dir && i == 0 && !matches!(mode, Mode::Insert) {
+            if matches!(mode, Mode::Normal) {
+                spans.push(Span::styled(" ", base.add_modifier(Modifier::REVERSED)));
             }
+            spans.push(Span::styled("(empty — o to add a file, name/ for a dir)", Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
+        } else {
+            // ` -> target` of a symlink line in teal; the normal-mode cursor reversed
+            let arrow = link_now.map(|_| plan::split_link(&l.text).0.chars().count());
+            let link_style = Style::default().fg(th.teal).add_modifier(Modifier::DIM);
+            let cursor = (is_cur && matches!(mode, Mode::Normal)).then(|| b.col.saturating_sub(off));
+            let mut cells: Vec<(char, Style)> = shown
+                .iter()
+                .enumerate()
+                .map(|(k, &c)| {
+                    let st = if arrow.is_some_and(|a| off + k >= a) { link_style } else { base };
+                    (c, if cursor == Some(k) { st.add_modifier(Modifier::REVERSED) } else { st })
+                })
+                .collect();
+            if cursor.is_some_and(|c| c >= shown.len()) {
+                cells.push((' ', base.add_modifier(Modifier::REVERSED)));
+            }
+            let mut run = String::new();
+            let mut st = base;
+            for (c, cst) in cells {
+                if cst != st && !run.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut run), st));
+                }
+                st = cst;
+                run.push(c);
+            }
+            spans.push(Span::styled(run, st));
         }
         if is_cur && matches!(mode, Mode::Insert) {
-            let x = list_inner.x + used as u16 + (b.col - off) as u16;
+            let cx: usize = chars[off..b.col.min(chars.len())].iter().map(|c| cw(*c)).sum();
+            let x = list_inner.x + used as u16 + cx as u16;
             cursor_pos = Some(Position::new(x.min(list_inner.right().saturating_sub(1)), list_inner.y + (i - b.scroll) as u16));
         }
-        let text_w = shown.len().max(if is_cur { 1 } else { 0 });
-        if !tail.is_empty() && used + text_w + tail_w < w {
-            let (link, det): (Vec<_>, Vec<_>) = tail.into_iter().partition(|s| s.content.starts_with(" →"));
-            let lw: usize = link.iter().map(|s| s.content.width()).sum();
-            let dw: usize = det.iter().map(|s| s.content.width()).sum();
-            spans.extend(link);
-            if !det.is_empty() {
-                spans.push(Span::raw(" ".repeat(w.saturating_sub(used + text_w + lw + dw))));
-                spans.extend(det);
+        let text_w = text_w.max(if is_cur { 1 } else { 0 });
+        let tail_w: usize = tail.iter().map(|s| s.content.width()).sum();
+        let mut room = w.saturating_sub(used + text_w + tail_w);
+        for sp in after {
+            let aw = sp.content.width();
+            if aw < room {
+                room -= aw;
+                spans.push(sp);
             }
+        }
+        if !tail.is_empty() && used + text_w + tail_w < w {
+            spans.push(Span::raw(" ".repeat(room)));
+            spans.extend(tail);
         }
         let mut line = Line::from(spans);
         if let Some(bg) = row_bg {
@@ -312,11 +404,11 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if let Some(pr) = prev {
         let target = b.cur_entry(store).map(|e| e.path.clone());
-        draw_preview(f, app, pr, target.as_deref(), None);
+        draw_preview(f, app, pr, target.as_deref(), None, false);
     }
 }
 
-fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, line: Option<usize>) {
+fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, line: Option<usize>, diff: bool) {
     let th = app.th.clone();
     let [title, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let Some(path) = path else {
@@ -324,6 +416,10 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, l
         return;
     };
     let meta = std::fs::symlink_metadata(path).ok();
+    if meta.is_none() && !diff {
+        f.render_widget(Paragraph::new(Line::styled("  no preview", Style::default().fg(th.dim))), body);
+        return;
+    }
     let mut t = vec![Span::styled(format!(" {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), Style::default().fg(th.text).add_modifier(Modifier::BOLD))];
     if let Some(m) = &meta {
         if !m.is_dir() {
@@ -336,7 +432,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, l
     }
     f.render_widget(Paragraph::new(Line::from(t)), title);
     let hidden = app.hidden;
-    let c = app.preview.get(path, line, body.width, &th, hidden, crate::preview::PREVIEW_LINES);
+    let c = app.preview.get(path, line, body.width, &th, hidden, crate::preview::PREVIEW_LINES, diff);
     let base = c.focus.saturating_sub(body.height as usize / 3);
     let start = (base + app.preview_scroll).min(c.lines.len().saturating_sub(1));
     let lines: Vec<Line> = c.lines.iter().skip(start).take(body.height as usize).cloned().collect();
@@ -350,7 +446,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let hidden = app.hidden;
     let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let Some(v) = app.viewer.as_mut() else { return };
-    let c = app.viewer_cache.get(&v.path, v.line, body.width.saturating_sub(1), &th, hidden, crate::preview::VIEWER_LINES);
+    let c = app.viewer_cache.get(&v.path, v.line, body.width.saturating_sub(1), &th, hidden, crate::preview::VIEWER_LINES, false);
     let h = body.height as usize;
     v.height = h;
     v.total = c.lines.len();
@@ -361,7 +457,11 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let dir = v.path.parent().map(tilde).unwrap_or_default();
     let meta = std::fs::metadata(&v.path).ok();
     let (ic, col) = entry::icon(&name, Kind::File);
-    let pos = if v.total == 0 { String::new() } else { format!("{}–{} of {} ", top + 1, (top + h).min(v.total), v.total) };
+    let mut pos = if v.total == 0 { String::new() } else { format!("{}–{} of {} ", top + 1, (top + h).min(v.total), v.total) };
+    if !v.search.is_empty() && !v.hits.is_empty() {
+        let i = v.at.and_then(|a| v.hits.iter().position(|&x| x == a)).map(|i| i + 1).unwrap_or(0);
+        pos = format!("/{} {i}/{}   {pos}", v.search, v.hits.len());
+    }
     let mut hs = vec![
         Span::styled(format!(" {ic} "), Style::default().fg(icon_color(&th, col))),
         Span::styled(format!("{dir}/"), Style::default().fg(th.subtext)),
@@ -374,9 +474,54 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     hs.push(Span::raw(" ".repeat((head.width as usize).saturating_sub(used + pos.width()))));
     hs.push(Span::styled(pos, Style::default().fg(th.dim)));
     f.render_widget(Paragraph::new(Line::from(hs)), head);
-    let lines: Vec<Line> = c.lines.iter().skip(top).take(h).cloned().collect();
+    // search hits: matches highlighted, a bar in the gutter, current hit's row tinted
+    let mut gutter = Vec::new();
+    let lines: Vec<Line> = c
+        .lines
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(h)
+        .map(|(i, l)| {
+            let hit = !v.search.is_empty() && v.hits.binary_search(&i).is_ok();
+            gutter.push(Line::styled(if hit { "▌" } else { " " }, Style::default().fg(if v.at == Some(i) { th.yellow } else { th.peach })));
+            if !hit {
+                return l.clone();
+            }
+            let l = mark_matches(l, &v.search, Style::default().fg(Color::Black).bg(th.yellow));
+            if v.at == Some(i) { l.style(Style::default().bg(th.selection)) } else { l }
+        })
+        .collect();
     app.list_area = body;
+    f.render_widget(Paragraph::new(gutter), Rect { width: 1.min(body.width), ..body });
     f.render_widget(Paragraph::new(lines), Rect { x: body.x + 1, width: body.width.saturating_sub(1), ..body });
+}
+
+/// Restyle every (smart-case) occurrence of `pat` inside a styled line.
+fn mark_matches(l: &Line<'static>, pat: &str, hl: Style) -> Line<'static> {
+    let smart = pat.chars().any(|c| c.is_uppercase());
+    let fold = |c: char| if smart { c } else { c.to_lowercase().next().unwrap_or(c) };
+    let cells: Vec<(char, Style)> = l.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, s.style))).collect();
+    let p: Vec<char> = pat.chars().map(fold).collect();
+    let mut on = vec![false; cells.len()];
+    let mut i = 0;
+    while !p.is_empty() && i + p.len() <= cells.len() {
+        if cells[i..i + p.len()].iter().zip(&p).all(|((c, _), q)| fold(*c) == *q) {
+            on[i..i + p.len()].iter_mut().for_each(|x| *x = true);
+            i += p.len();
+        } else {
+            i += 1;
+        }
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (k, (c, st)) in cells.into_iter().enumerate() {
+        let st = if on[k] { st.patch(hl) } else { st };
+        match spans.last_mut() {
+            Some(last) if last.style == st => last.content.to_mut().push(c),
+            _ => spans.push(Span::styled(c.to_string(), st)),
+        }
+    }
+    Line::from(spans).style(l.style)
 }
 
 // ── finder ──────────────────────────────────────────────────────────────────
@@ -435,6 +580,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         (FinderKind::Dirs, "Dirs", "\u{f024b}"),
         (FinderKind::Grep, "Grep", "\u{f0349}"),
         (FinderKind::Recent, "Recent", "\u{f02da}"),
+        (FinderKind::Git, "Git", "\u{e702}"),
     ] {
         let st = if fd.kind == k {
             Style::default().fg(Color::Black).bg(th.accent).add_modifier(Modifier::BOLD)
@@ -471,9 +617,10 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     // prompt
     let ph = match fd.kind {
         _ if transfer.is_some() => "pick the destination folder (a file means its folder)…",
-        FinderKind::Grep => "search file contents (ripgrep, smart-case)…",
+        FinderKind::Grep => "search file contents (ripgrep, smart-case)  · foo -- *.rs -t py",
         FinderKind::Dirs => "fuzzy-find directories…",
         FinderKind::Recent => "recently opened files…",
+        FinderKind::Git => "changed & untracked files (git status) — preview shows the diff…",
         FinderKind::Files => "fuzzy-find files  ('exact ^prefix suffix$ !not)",
     };
     let mut ps = vec![Span::styled(" \u{f0349} ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD))];
@@ -517,7 +664,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let (scroll, sel) = (fd.scroll, fd.sel);
     let items = fd.items(scroll, scroll + h);
     let marked = fd.marked.clone();
-    let query = fd.query.clone();
+    let query = crate::finder::grep_query(&fd.query).0;
     let kind = fd.kind;
     let w = list_inner.width as usize;
     let mut lines = Vec::new();
@@ -529,6 +676,15 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
             Style::default().fg(th.accent),
         )];
         sp.push(Span::styled(if marked.contains(&it.abs) { "●" } else { " " }, Style::default().fg(th.peach)));
+        if let Some(g) = it.git {
+            let gcol = match g {
+                'M' | 'R' => th.yellow,
+                'A' => th.green,
+                '?' => th.teal,
+                _ => th.red,
+            };
+            sp.push(Span::styled(format!("{g} "), Style::default().fg(gcol).add_modifier(Modifier::BOLD)));
+        }
         let name = it.display.trim_end_matches('/');
         let base_name = name.rsplit('/').next().unwrap_or(name);
         let (ic, col) = entry::icon(base_name, if it.is_dir { Kind::Dir } else { Kind::File });
@@ -566,6 +722,8 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         let msg = match kind {
             FinderKind::Grep if query.is_empty() => "type to search inside files",
             FinderKind::Recent => "nothing opened through herdr-oil yet",
+            FinderKind::Git if app.finder.as_ref().is_some_and(|f| f.git.is_none()) => "not in a git repository (or it defines its own filters)",
+            FinderKind::Git if query.is_empty() => "working tree clean",
             _ => "no matches",
         };
         lines.push(Line::styled(format!("  {msg}"), Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
@@ -576,8 +734,8 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         let sel_item = items.into_iter().nth(sel.saturating_sub(scroll)).filter(|_| sel >= scroll);
         let inner = p;
         match sel_item {
-            Some(it) => draw_preview(f, app, inner, Some(&it.abs), it.line),
-            None => draw_preview(f, app, inner, None, None),
+            Some(it) => draw_preview(f, app, inner, Some(&it.abs), it.line, it.git.is_some_and(|c| c != '?')),
+            None => draw_preview(f, app, inner, None, None, false),
         }
     }
 }
@@ -590,22 +748,39 @@ pub const KEYHINTS: &[(&str, &[(&str, &str)])] = &[
         ("g", "first line"),
         (".", "show/hide hidden files"),
         ("s", "cycle sort"),
+        ("S", "reverse sort"),
         ("d", "sizes → details → off"),
         ("p", "toggle preview"),
         ("x", "open with system app"),
-        ("y", "copy path"),
+        ("y", "copy relative path"),
+        ("Y", "copy absolute path"),
+        ("n", "copy file name"),
+        ("i", "send path to origin pane"),
+        ("e", "edit listing in $EDITOR"),
         ("f", "find files"),
         ("/", "grep"),
         ("?", "all keys"),
     ]),
-    (" ", &[("f", "find files"), ("g", "grep"), ("d", "find folders"), ("r", "recent files"), ("␣", "find files")]),
+    (" ", &[("f", "find files"), ("g", "grep"), ("d", "find folders"), ("r", "recent files"), ("s", "git changes"), ("␣", "find files")]),
     ("Z", &[("Z", "apply and quit"), ("Q", "quit, discard edits")]),
 ];
 
 fn draw_keyhint(f: &mut Frame, app: &App, area: Rect) {
     let pend = app.vim.pending_str();
     let key: String = pend.trim_start_matches(|c: char| c.is_ascii_digit()).to_string();
-    let Some((_, base)) = KEYHINTS.iter().find(|(k, _)| *k == key) else { return };
+    // marks: m{a-z} sets, '{a-z} jumps — list what is there
+    let marks: Vec<(String, String)> = app.marks.iter().map(|(k, p)| (k.to_string(), tilde(p))).collect();
+    let mark_rows: Vec<(&str, &str)> = match key.as_str() {
+        "'" | "`" if marks.is_empty() => vec![("", "no marks yet — m{a-z} marks this folder")],
+        "'" | "`" => marks.iter().map(|(k, p)| (k.as_str(), p.as_str())).collect(),
+        "m" => std::iter::once(("a-z", "mark this folder")).chain(marks.iter().map(|(k, p)| (k.as_str(), p.as_str()))).collect(),
+        _ => vec![],
+    };
+    let base: &[(&str, &str)] = match KEYHINTS.iter().find(|(k, _)| *k == key) {
+        Some((_, b)) => b,
+        None if !mark_rows.is_empty() => &mark_rows,
+        None => return,
+    };
     let th = &app.th;
     // gm / gc only exist while something is yanked or cut
     let n = app.vim.reg_entries();
@@ -646,10 +821,24 @@ fn draw_keyhint(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.th;
-    if let (View::Explorer, Mode::Cmd { kind, text, cur, .. }) = (app.view, &app.vim.mode) {
-        let line = Line::from(vec![Span::styled(kind.to_string(), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(text.clone(), Style::default().fg(th.text))]);
-        f.render_widget(Paragraph::new(line), area);
-        let x: usize = text.chars().take(*cur).map(|c| c.to_string().width()).sum();
+    let typing = match (app.view, &app.vim.mode) {
+        (View::Explorer, Mode::Cmd { kind, text, cur, .. }) => Some((*kind, text.clone(), *cur)),
+        (View::Viewer, _) => app.viewer.as_ref().and_then(|v| v.typing.clone()).map(|t| ('/', t.clone(), t.chars().count())),
+        _ => None,
+    };
+    if let Some((kind, text, cur)) = typing {
+        let mut sp = vec![Span::styled(kind.to_string(), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(text.clone(), Style::default().fg(th.text))];
+        // completions / live :s match count, right-aligned
+        if let Some((m, k, _)) = &app.msg {
+            let used = 1 + text.width();
+            let mw = m.width();
+            if used + mw + 3 < area.width as usize {
+                sp.push(Span::raw(" ".repeat(area.width as usize - used - mw - 1)));
+                sp.push(Span::styled(m.clone(), Style::default().fg(if *k == MsgKind::Err { th.red } else { th.dim })));
+            }
+        }
+        f.render_widget(Paragraph::new(Line::from(sp)), area);
+        let x: usize = text.chars().take(cur).map(|c| c.to_string().width()).sum();
         f.set_cursor_position(Position::new(area.x + 1 + x as u16, area.y));
         return;
     }
@@ -676,14 +865,14 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         sp.push(Span::styled(m.clone(), Style::default().fg(c)));
     }
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
-        (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("e", "edit here"), ("^v", "split"), ("^t", "tab"), ("y", "copy path"), ("q", "back")],
+        (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("/ n N", "search"), ("e", "edit here"), ("p", "send"), ("y", "copy path"), ("q", "back")],
         (View::Finder, _) if app.transfer.is_some() => &[("⏎", "here"), ("^n", "new folder from query"), ("⇥", "files/dirs"), ("^r", "root"), ("esc", "cancel")],
-        (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^t", "tab"), ("^o", "reveal"), ("⇥", "mode"), ("^r", "root"), ("esc", "back")],
+        (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^o", "reveal"), ("^s", "send"), ("⇥", "mode"), ("^r", "root"), ("esc", "back")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
-        (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("esc", "cancel")],
+        (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("I A", "prefix/suffix"), (":", "s/…/…/"), ("esc", "cancel")],
         _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "find"), ("g?", "help"), ("esc", "close")],
         _ if app.vim.reg_entries() > 0 => &[("⏎", "open"), ("p", "paste"), ("gm", "move yanked to…"), ("gc", "copy yanked to…"), (":w", "apply"), ("g?", "help"), ("esc", "close")],
-        _ => &[("⏎", "open"), ("-", "up"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("esc", "close")],
+        _ => &[("⏎", "open"), ("-", "up"), ("H L", "back/fwd"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("esc", "close")],
     };
     let mut hs = Vec::new();
     for (k, v) in hints {
@@ -720,7 +909,11 @@ fn frame<'a>(th: &Theme, title: &'a str, color: Color) -> Block<'a> {
 fn common_base(plan: &plan::Plan) -> std::path::PathBuf {
     let mut base: Option<std::path::PathBuf> = None;
     for op in &plan.ops {
-        for p in [op.src(), op.dst()].into_iter().flatten() {
+        let relink = match op {
+            Op::Retarget { path, .. } => Some(path.as_path()),
+            _ => None,
+        };
+        for p in [op.src(), op.dst(), relink].into_iter().flatten() {
             let parent = p.parent().unwrap_or(Path::new("/")).to_path_buf();
             base = Some(match base {
                 None => parent,
@@ -747,42 +940,91 @@ fn rel(base: &Path, p: &Path) -> String {
     }
 }
 
+/// Old → new with only the differing middle highlighted: common prefix and
+/// suffix stay plain, removed chars red/struck, added chars green.
+fn diff_spans(th: &Theme, a: &str, b: &str) -> Vec<Span<'static>> {
+    let (ac, bc): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let pre = ac.iter().zip(&bc).take_while(|(x, y)| x == y).count();
+    let max_suf = ac.len().min(bc.len()) - pre;
+    let suf = ac.iter().rev().zip(bc.iter().rev()).take(max_suf).take_while(|(x, y)| x == y).count();
+    let s = |v: &[char]| v.iter().collect::<String>();
+    let plain = Style::default().fg(th.subtext);
+    let del = Style::default().fg(th.red).add_modifier(Modifier::CROSSED_OUT);
+    let add = Style::default().fg(th.green).add_modifier(Modifier::BOLD);
+    let mut out = Vec::new();
+    for (v, hl) in [(&ac, del), (&bc, add)] {
+        if !out.is_empty() {
+            out.push(Span::styled("  →  ", Style::default().fg(th.dim)));
+        }
+        out.push(Span::styled(s(&v[..pre]), plain));
+        out.push(Span::styled(s(&v[pre..v.len() - suf]), hl));
+        out.push(Span::styled(s(&v[v.len() - suf..]), plain));
+    }
+    out
+}
+
 fn draw_confirm(f: &mut Frame, app: &App, area: Rect) {
-    let Overlay::Confirm { plan, scroll, .. } = &app.overlay else { return };
+    let Overlay::Confirm { plan, scroll, undo, .. } = &app.overlay else { return };
     let th = &app.th;
-    let trash = matches!(app.cfg.delete, crate::config::DeleteMethod::Trash);
+    let trash = *undo || matches!(app.cfg.delete, crate::config::DeleteMethod::Trash);
     let base = common_base(plan);
     let mut lines = Vec::new();
+    let mut counts: Vec<(&str, usize, Color)> = Vec::new();
     for op in &plan.ops {
-        let (tag, col, text) = match op {
-            Op::Create { dst, dir } => ("CREATE", th.green, format!("{}{}", rel(&base, dst), if *dir { "/" } else { "" })),
+        let slash = |d: bool| if d { "/" } else { "" };
+        let (tag, col, body): (&str, Color, Vec<Span>) = match op {
+            Op::Create { dst, dir } => ("CREATE", th.green, vec![Span::styled(format!("{}{}", rel(&base, dst), slash(*dir)), Style::default().fg(th.green))]),
             Op::Move { src, dst, dir } => {
-                let s = if *dir { "/" } else { "" };
                 let same_dir = src.parent() == dst.parent();
-                (if same_dir { "RENAME" } else { "MOVE" }, th.yellow, format!("{}{s}  →  {}{s}", rel(&base, src), rel(&base, dst)))
+                let (a, b) = (format!("{}{}", rel(&base, src), slash(*dir)), format!("{}{}", rel(&base, dst), slash(*dir)));
+                (if same_dir { "RENAME" } else { "MOVE" }, if same_dir { th.yellow } else { th.blue }, diff_spans(th, &a, &b))
             }
-            Op::Copy { src, dst, dir } => {
-                let s = if *dir { "/" } else { "" };
-                ("COPY", th.blue, format!("{}{s}  →  {}{s}", rel(&base, src), rel(&base, dst)))
+            Op::Copy { src, dst, dir } => ("COPY", th.blue, diff_spans(th, &format!("{}{}", rel(&base, src), slash(*dir)), &format!("{}{}", rel(&base, dst), slash(*dir)))),
+            Op::Link { dst, target } => ("SYMLINK", th.teal, vec![Span::styled(rel(&base, dst), Style::default().fg(th.green)), Span::styled(format!("  ->  {target}"), Style::default().fg(th.teal))]),
+            Op::Retarget { path, target } => {
+                let old = std::fs::read_link(path).map(|t| t.display().to_string()).unwrap_or_default();
+                let mut v = vec![Span::styled(format!("{}  ", rel(&base, path)), Style::default().fg(th.text))];
+                v.extend(diff_spans(th, &old, target));
+                ("RELINK", th.teal, v)
             }
-            Op::Delete { src, dir } => ("DELETE", th.red, format!("{}{}{}", rel(&base, src), if *dir { "/" } else { "" }, if trash { "   (to Trash)" } else { "   (permanently!)" })),
+            Op::Delete { src, dir } => (
+                "DELETE",
+                th.red,
+                vec![
+                    Span::styled(format!("{}{}", rel(&base, src), slash(*dir)), Style::default().fg(th.text)),
+                    Span::styled(if trash { "   (to Trash)" } else { "   (permanently!)" }, Style::default().fg(if trash { th.dim } else { th.red })),
+                ],
+            ),
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {tag:<7}"), Style::default().fg(col).add_modifier(Modifier::BOLD)),
-            Span::styled(text, Style::default().fg(th.text)),
-        ]));
+        match counts.iter_mut().find(|(t, _, _)| *t == tag) {
+            Some(c) => c.1 += 1,
+            None => counts.push((tag, 1, col)),
+        }
+        let mut sp = vec![Span::styled(format!(" {tag:<7}"), Style::default().fg(col).add_modifier(Modifier::BOLD))];
+        sp.extend(body);
+        lines.push(Line::from(sp));
     }
-    let n = lines.len();
-    let title = format!("Apply {n} change{}?  in {}", if n == 1 { "" } else { "s" }, tilde(&base));
+    // one-line summary on top: "2 rename · 1 delete"
+    let mut sum = vec![Span::raw(" ")];
+    for (k, (tag, c, col)) in counts.iter().enumerate() {
+        if k > 0 {
+            sum.push(Span::styled(" · ", Style::default().fg(th.dim)));
+        }
+        sum.push(Span::styled(format!("{c} {}", tag.to_lowercase()), Style::default().fg(*col).add_modifier(Modifier::BOLD)));
+    }
+    lines.insert(0, Line::from(sum));
+    lines.insert(1, Line::raw(""));
+    let n = plan.ops.len();
+    let title = format!("{} {n} change{}?  in {}", if *undo { "Undo last apply:" } else { "Apply" }, if n == 1 { "" } else { "s" }, tilde(&base));
     let w = lines.iter().map(|l| l.width()).max().unwrap_or(30).max(44).max(title.width() + 6) as u16 + 4;
-    let h = (n as u16 + 4).min(area.height.saturating_sub(4));
+    let h = (lines.len() as u16 + 4).min(area.height.saturating_sub(4));
     let r = centered(area, w, h);
     f.render_widget(Clear, r);
     let blk = frame(th, &title, if plan.deletes() > 0 { th.red } else { th.accent });
     let inner = blk.inner(r);
     f.render_widget(blk, r);
     let [body, foot] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
-    let max_scroll = n.saturating_sub(body.height as usize);
+    let max_scroll = lines.len().saturating_sub(body.height as usize);
     let shown: Vec<Line> = lines.into_iter().skip((*scroll).min(max_scroll)).collect();
     f.render_widget(Paragraph::new(shown), body);
     f.render_widget(
@@ -843,15 +1085,21 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("_  ~", "start directory · home"),
         ("^v ^x ^t", "open in split right / below / new tab"),
         ("^e", "edit in $EDITOR inside the popup, come back after"),
+        ("H  L", "back · forward through visited folders"),
+        ("m{a-z}  '{a-z}  :marks", "mark this folder · jump to a mark · list"),
         ("gx", "open with system app"),
-        ("gy", "copy absolute path"),
-        ("g.  gs  gd", "hidden files · cycle sort · sizes → details → off"),
+        ("gy  gY  gn", "copy relative path · absolute path · name"),
+        ("gi  :'<,'>send", "type path(s) into the origin pane (@path for agents)"),
+        ("ge", "edit this listing in $EDITOR (/001 tags keep identity)"),
+        ("g.  gs  gS  gd", "hidden · cycle sort · reverse · sizes → details → off"),
         ("^p", "toggle preview (^f/^b scroll it)"),
         ("^l  :e!", "refresh · discard edits here"),
         ("q  esc  ZZ  ZQ", "quit (asks if unsaved) · apply+quit · discard+quit"),
     ]),
     ("Viewer (⏎ on a file)", &[
         ("j k  ␣ b  ^d ^u  g G", "scroll · page · half page · top/bottom"),
+        ("/pattern  n N", "search the file · next / previous hit"),
+        ("p", "send path (:line of the hit) to the origin pane"),
         ("e", "edit in $EDITOR, back to the viewer after"),
         ("^v ^x ^t  o", "open in split / below / tab · system app"),
         ("y", "copy path"),
@@ -865,21 +1113,30 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("dd → - / ⏎ → p", "cut + paste in another dir = move"),
         ("yy/dd → gm  yy → gc", "move / copy yanked entries to a fuzzy-picked folder"),
         ("yy → p", "duplicate line = copy"),
-        ("u  ^r", "undo · redo"),
+        ("u  ^r  .", "undo · redo · repeat last change on this line"),
+        (":%s/old/new/g", "rename by regex (live preview, $1 or \\1 groups)"),
+        ("V.. :s  I  A", "same on a selection · prefix · suffix the names"),
+        (":prefix x  :suffix x", "prepend · append before the extension"),
+        ("name -> target", "symlink: edit the target to relink, new line creates"),
+        ("U", "undo the last apply (U again redoes)"),
+        (":chmod +x  :%chmod 644", "change permissions (applies at once)"),
         (":w  ^s", "review & apply all pending changes"),
         (":touch a b  :mkdir d", "add entries quickly"),
-        (":cd path  :sort mtime", "jump · sort name|mtime|size|ext"),
+        (":cd path ⇥", "jump, ⇥ completes paths and commands"),
+        (":sort mtime  :sort!", "sort name|mtime|size|ext · reverse"),
     ]),
     ("Vim motions", &[
         ("h j k l w b e 0 ^ $", "motions, with counts"),
         ("gg G {n}G", "first / last / nth line"),
-        ("f F t T ;", "find char"),
+        ("f F t T ; ,", "find char · repeat · reverse"),
         ("i a I A s S C D x r ~ J", "the usual"),
         ("/pattern n N", "search lines"),
     ]),
-    ("Finder (⇥, ␣f files · ␣g grep · ␣d dirs · ␣r recent)", &[
+    ("Finder (⇥, ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git)", &[
         ("type", "fuzzy query ('exact ^prefix suffix$ !not)"),
-        ("⇥ ⇧⇥", "cycle Files / Dirs / Grep / Recent"),
+        ("foo -- *.rs  -t py", "grep: only these globs / file types"),
+        ("⇥ ⇧⇥", "cycle Files / Dirs / Grep / Recent / Git"),
+        ("^s", "send selection / marked to the origin pane"),
         ("⏎ ^v ^x ^t ^e", "open (default · split · below · tab · popup)"),
         ("^o", "reveal in explorer"),
         ("^space", "mark several files, ⏎ opens all"),

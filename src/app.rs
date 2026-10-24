@@ -11,11 +11,11 @@ use crate::open::{self, Outcome};
 use crate::plan::{self, Plan};
 use crate::preview;
 use crate::theme::Theme;
-use crate::vim::{Action, FinderKind, Mode, Reg, Vim};
+use crate::vim::{Action, FinderKind, Mode, PathKind, Reg, Vim};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,13 @@ pub struct Viewer {
     pub back: View,
     pub height: usize,
     pub total: usize,
+    /// `/` prompt being typed.
+    pub typing: Option<String>,
+    /// Last search and the (cache) line indices that match it.
+    pub search: String,
+    pub hits: Vec<usize>,
+    /// Line of the current hit.
+    pub at: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,7 +61,8 @@ pub enum MsgKind {
 
 pub enum Overlay {
     None,
-    Confirm { plan: Plan, scroll: usize, then_quit: bool },
+    /// `undo`: the plan rolls back the last apply (deletes always go to Trash).
+    Confirm { plan: Plan, scroll: usize, then_quit: bool, undo: bool },
     Help { scroll: usize },
     QuitPrompt,
     Report { title: String, lines: Vec<String>, error: bool, scroll: usize },
@@ -89,9 +97,97 @@ pub struct App {
     pub pick: bool,
     pub picked: Vec<PathBuf>,
     suspend: Option<Vec<String>>,
+    /// Listing handed to `$EDITOR` (`ge`): temp file, line-id table, directory.
+    edit_file: Option<(PathBuf, Vec<u64>, PathBuf)>,
+    /// Inverse of the last applied batch, for `U`.
+    pub last_batch: Option<Vec<plan::Op>>,
     pub list_area: Rect,
     last_click: Option<(Instant, u16)>,
     pub spinner: usize,
+    /// Visited directories for `H` / `L`.
+    back: Vec<PathBuf>,
+    fwd: Vec<PathBuf>,
+    hist_nav: bool,
+    /// Directory bookmarks (`m{a-z}` / `'{a-z}`), persisted in the state dir.
+    pub marks: BTreeMap<char, PathBuf>,
+}
+
+fn marks_file(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("marks")
+}
+
+fn load_marks(cfg: &Config) -> BTreeMap<char, PathBuf> {
+    let text = std::fs::read_to_string(marks_file(cfg)).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (k, p) = l.split_once('\t')?;
+            let c = k.chars().next().filter(|c| c.is_ascii_alphabetic() && k.len() == 1)?;
+            Some((c, PathBuf::from(p)))
+        })
+        .collect()
+}
+
+/// Paths as typed into the origin pane: relative to where the popup was
+/// opened, `:line` when known, `@path` for agents, shell-quoted otherwise.
+fn send_words(paths: &[(PathBuf, Option<usize>)], start: &Path, agent: bool) -> Vec<String> {
+    paths
+        .iter()
+        .map(|(p, line)| {
+            let rel = match p.strip_prefix(start) {
+                Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
+                _ => p.display().to_string(),
+            };
+            let rel = match line {
+                Some(n) => format!("{rel}:{n}"),
+                None => rel,
+            };
+            if agent { format!("@{rel}") } else { open::sh_quote(&rel) }
+        })
+        .collect()
+}
+
+/// `:chmod` spec on a mode: octal (`755`) or `[ugoa]*[+-=][rwx]+` (`+x`, `go-w`).
+pub fn chmod_mode(mode: u32, spec: &str) -> Option<u32> {
+    if !spec.is_empty() && spec.len() <= 4 && spec.chars().all(|c| ('0'..='7').contains(&c)) {
+        return u32::from_str_radix(spec, 8).ok();
+    }
+    let op_at = spec.find(['+', '-', '='])?;
+    let (who, rest) = spec.split_at(op_at);
+    let (op, bits) = rest.split_at(1);
+    if bits.is_empty() || !who.chars().all(|c| "ugoa".contains(c)) || !bits.chars().all(|c| "rwx".contains(c)) {
+        return None;
+    }
+    let who = if who.is_empty() || who.contains('a') { "ugo" } else { who };
+    let mut mask = 0;
+    for w in who.chars() {
+        let shift = match w {
+            'u' => 6,
+            'g' => 3,
+            _ => 0,
+        };
+        for b in bits.chars() {
+            mask |= match b {
+                'r' => 4,
+                'w' => 2,
+                _ => 1,
+            } << shift;
+        }
+    }
+    Some(match op {
+        "+" => mode | mask,
+        "-" => mode & !mask,
+        _ => {
+            let mut clear = 0;
+            for w in who.chars() {
+                clear |= 7 << match w {
+                    'u' => 6,
+                    'g' => 3,
+                    _ => 0,
+                };
+            }
+            (mode & !clear) | mask
+        }
+    } & 0o7777)
 }
 
 impl App {
@@ -129,9 +225,15 @@ impl App {
             pick,
             picked: vec![],
             suspend: None,
+            edit_file: None,
+            last_batch: None,
             list_area: Rect::default(),
             last_click: None,
             spinner: 0,
+            back: vec![],
+            fwd: vec![],
+            hist_nav: false,
+            marks: load_marks(&cfg),
             cfg,
         };
         app.goto(&dir, focus.as_deref());
@@ -146,6 +248,10 @@ impl App {
             }
             "recent" => {
                 app.open_finder(FinderKind::Recent);
+                app.finder_only = true;
+            }
+            "git" | "changes" => {
+                app.open_finder(FinderKind::Git);
                 app.finder_only = true;
             }
             _ => {}
@@ -185,10 +291,17 @@ impl App {
         // Drop unmodified buffers of other dirs to keep things fresh.
         let cwd = dir.clone();
         self.buffers.retain(|d, b| *d == cwd || b.modified());
+        if dir != self.cwd && !self.hist_nav {
+            self.back.push(self.cwd.clone());
+            if self.back.len() > 100 {
+                self.back.remove(0);
+            }
+            self.fwd.clear();
+        }
         self.cwd = dir;
         if let Some(name) = focus {
             let b = self.buf_mut();
-            if let Some(i) = b.lines.iter().position(|l| l.text.trim_end_matches('/') == name) {
+            if let Some(i) = b.lines.iter().position(|l| l.name() == name) {
                 b.row = i;
             }
         }
@@ -230,19 +343,28 @@ impl App {
             return;
         }
         if self.cfg.confirm || plan.deletes() > 0 {
-            self.overlay = Overlay::Confirm { plan, scroll: 0, then_quit };
+            self.overlay = Overlay::Confirm { plan, scroll: 0, then_quit, undo: false };
         } else {
-            self.execute(plan, then_quit);
+            self.execute(plan, then_quit, false);
         }
     }
 
-    fn execute(&mut self, plan: Plan, then_quit: bool) {
-        let rep = apply::apply(&plan.ops, self.cfg.delete);
+    fn execute(&mut self, plan: Plan, then_quit: bool, undo: bool) {
+        let method = if undo { crate::config::DeleteMethod::Trash } else { self.cfg.delete };
+        let rep = apply::apply(&plan.ops, method);
+        if !rep.undo.is_empty() {
+            self.last_batch = Some(rep.undo.clone());
+        }
         let focus = rep.landed.iter().find(|p| p.parent() == Some(self.cwd.as_path())).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let focus = focus.or_else(|| self.buf().cur().text.trim().trim_end_matches('/').split('/').next().map(str::to_string));
+        let focus = focus.or_else(|| self.buf().cur().name().split('/').next().map(str::to_string));
         self.reload_all(focus);
         if rep.errors.is_empty() {
-            self.flash(format!("applied {} change(s)", plan.ops.len()), MsgKind::Ok);
+            let msg = match (undo, rep.permanent) {
+                (true, _) => format!("undid {} change(s) — U redoes", plan.ops.len()),
+                (false, 0) => format!("applied {} change(s) — U undoes", plan.ops.len()),
+                (false, n) => format!("applied {} change(s) — U undoes all but {n} permanent delete(s)", plan.ops.len()),
+            };
+            self.flash(msg, MsgKind::Ok);
             if then_quit {
                 self.quit = true;
             }
@@ -275,7 +397,8 @@ impl App {
         finder::push_recent(&self.cfg.state_dir, &files);
         if how == OpenTarget::View {
             let back = if self.view == View::Viewer { View::Explorer } else { self.view };
-            self.viewer = Some(Viewer { path: files[0].clone(), line, top: None, back, height: 20, total: 0 });
+            let search = self.viewer.as_ref().map(|v| v.search.clone()).unwrap_or_default();
+            self.viewer = Some(Viewer { path: files[0].clone(), line, top: None, back, height: 20, total: 0, typing: None, search, hits: vec![], at: None });
             self.view = View::Viewer;
             return;
         }
@@ -446,19 +569,63 @@ impl App {
                 }
                 self.hidden = !self.hidden;
                 let cwd = self.cwd.clone();
-                let name = self.buf().cur().text.trim_end_matches('/').to_string();
+                let name = self.buf().cur().name().to_string();
                 self.buffers.clear();
                 self.goto(&cwd, Some(&name));
                 self.flash(if self.hidden { "showing hidden files" } else { "hiding dotfiles" }, MsgKind::Info);
             }
-            Action::CycleSort => {
-                self.sort = self.sort.next();
+            Action::CycleSort | Action::ReverseSort => {
+                if a == Action::CycleSort {
+                    self.sort = self.sort.next();
+                } else {
+                    self.store.reverse = !self.store.reverse;
+                }
                 let s = self.sort;
                 let store = &self.store;
                 if let Some(b) = self.buffers.get_mut(&self.cwd) {
                     b.resort(store, s);
                 }
-                self.flash(format!("sort: {}", s.label()), MsgKind::Info);
+                let rev = if self.store.reverse { ", reversed" } else { "" };
+                self.flash(format!("sort: {}{rev}", s.label()), MsgKind::Info);
+            }
+            Action::HistBack | Action::HistFwd => {
+                let fwd = a == Action::HistFwd;
+                loop {
+                    let next = if fwd { self.fwd.pop() } else { self.back.pop() };
+                    let Some(d) = next else {
+                        self.flash(if fwd { "no newer directory" } else { "no older directory" }, MsgKind::Info);
+                        break;
+                    };
+                    if d.is_dir() && d != self.cwd {
+                        let here = self.cwd.clone();
+                        if fwd { self.back.push(here) } else { self.fwd.push(here) }
+                        self.hist_nav = true;
+                        self.goto(&d, None);
+                        self.hist_nav = false;
+                        break;
+                    }
+                }
+            }
+            Action::SetMark(c) => {
+                self.marks.insert(c, self.cwd.clone());
+                let text: String = self.marks.iter().map(|(k, p)| format!("{k}\t{}\n", p.display())).collect();
+                let _ = std::fs::create_dir_all(&self.cfg.state_dir);
+                match std::fs::write(marks_file(&self.cfg), text) {
+                    Ok(()) => self.flash(format!("mark '{c} → {}", finder::tilde(&self.cwd)), MsgKind::Ok),
+                    Err(e) => self.flash(format!("mark '{c} set, not saved: {e}"), MsgKind::Warn),
+                }
+            }
+            Action::JumpMark(c) => match self.marks.get(&c).cloned() {
+                Some(p) if p.is_dir() => self.goto(&p, None),
+                Some(p) => self.flash(format!("mark '{c}: {} is gone", finder::tilde(&p)), MsgKind::Warn),
+                None => self.flash(format!("no mark '{c} — m{c} sets it"), MsgKind::Info),
+            },
+            Action::Chmod { spec, ids } => self.chmod(&spec, &ids),
+            Action::UndoApply => self.undo_apply(),
+            Action::EditBuffer => self.edit_buffer(),
+            Action::Send(ids) => {
+                let paths: Vec<(PathBuf, Option<usize>)> = ids.iter().filter_map(|id| self.store.get(*id)).map(|e| (e.path.clone(), None)).collect();
+                self.send_paths(paths);
             }
             Action::ToggleDetails => {
                 self.details = (self.details + 1) % 3;
@@ -491,14 +658,24 @@ impl App {
             }
             Action::Finder(k) => self.open_finder(k),
             Action::Transfer { copy } => self.start_transfer(copy),
-            Action::YankPath => {
+            Action::YankPath(kind) => {
                 let p = match self.buf().cur_entry(&self.store) {
                     Some(e) => e.path.clone(),
                     None => self.cwd.clone(),
                 };
-                let s = p.display().to_string();
+                let s = match kind {
+                    PathKind::Absolute => p.display().to_string(),
+                    PathKind::Name => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
+                    PathKind::Relative => {
+                        let root = finder::repo_root(&self.cwd).unwrap_or_else(|| self.start.clone());
+                        match p.strip_prefix(&root) {
+                            Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
+                            _ => p.display().to_string(),
+                        }
+                    }
+                };
                 match open::clipboard(&s) {
-                    Ok(()) => self.flash(format!("copied {}", finder::tilde(&p)), MsgKind::Ok),
+                    Ok(()) => self.flash(format!("copied {s}"), MsgKind::Ok),
                     Err(e) => self.flash(e, MsgKind::Err),
                 }
             }
@@ -542,7 +719,171 @@ impl App {
                 let s = finder::tilde(&self.cwd);
                 self.flash(s, MsgKind::Info);
             }
+            "marks" => {
+                let lines: Vec<String> = if self.marks.is_empty() {
+                    vec!["no marks yet — m{a-z} marks the current folder, '{a-z} jumps back".into()]
+                } else {
+                    self.marks.iter().map(|(k, p)| format!("'{k}   {}", finder::tilde(p))).collect()
+                };
+                self.overlay = Overlay::Report { title: "Marks".into(), lines, error: false, scroll: 0 };
+            }
             _ => self.flash(format!("unknown command: {c}"), MsgKind::Err),
+        }
+    }
+
+    /// `U`: review and run the inverse of the last applied batch. Running it
+    /// records its own inverse, so `U` again redoes.
+    fn undo_apply(&mut self) {
+        if !self.modified_dirs().is_empty() {
+            self.flash("save (:w) or discard (:e!) the current edits before undoing the last apply", MsgKind::Warn);
+            return;
+        }
+        let Some(ops) = self.last_batch.clone() else {
+            self.flash("nothing applied in this session yet", MsgKind::Info);
+            return;
+        };
+        let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+        let (ops, gone): (Vec<_>, Vec<_>) = ops.into_iter().partition(|op| match op {
+            plan::Op::Move { src, .. } | plan::Op::Delete { src, .. } => exists(src),
+            plan::Op::Retarget { path, .. } => std::fs::read_link(path).is_ok(),
+            _ => true,
+        });
+        if ops.is_empty() {
+            self.flash("the last apply was already changed on disk — nothing to undo", MsgKind::Warn);
+            return;
+        }
+        let errors = gone.iter().filter_map(|op| op.src().map(|p| format!("{}: no longer there, skipped", finder::tilde(p)))).collect::<Vec<_>>();
+        if !errors.is_empty() {
+            self.flash(errors.join(" · "), MsgKind::Warn);
+        }
+        self.overlay = Overlay::Confirm { plan: Plan { ops, errors: vec![] }, scroll: 0, then_quit: false, undo: true };
+    }
+
+    /// `ge`: hand this listing to `$EDITOR` as `/001 name` lines (the number
+    /// keeps the entry identity, like oil.nvim), read it back after.
+    fn edit_buffer(&mut self) {
+        let mut table = Vec::new();
+        let mut text = String::new();
+        for l in &self.buf().lines {
+            match l.id {
+                Some(id) => {
+                    table.push(id);
+                    text.push_str(&format!("/{:03} {}\n", table.len(), l.text));
+                }
+                None if l.significant() => text.push_str(&format!("{}\n", l.text)),
+                None => {}
+            }
+        }
+        let _ = std::fs::create_dir_all(&self.cfg.state_dir);
+        let path = self.cfg.state_dir.join(format!("listing-{}.oil", std::process::id()));
+        if let Err(e) = std::fs::write(&path, text) {
+            self.flash(format!("cannot write {}: {e}", finder::tilde(&path)), MsgKind::Err);
+            return;
+        }
+        self.suspend = Some(open::editor_argv(&self.cfg.editor(), std::slice::from_ref(&path), None));
+        self.edit_file = Some((path, table, self.cwd.clone()));
+    }
+
+    /// Read the listing back from the editor into its buffer (one undo step).
+    fn finish_edit_buffer(&mut self) {
+        let Some((path, table, dir)) = self.edit_file.take() else { return };
+        let text = std::fs::read_to_string(&path);
+        let _ = std::fs::remove_file(&path);
+        let Ok(text) = text else {
+            self.flash("editor left no listing behind — nothing changed", MsgKind::Warn);
+            return;
+        };
+        let mut lines = Vec::new();
+        let mut bad = 0;
+        for raw in text.lines() {
+            let tagged = raw.strip_prefix('/').and_then(|r| r.split_once(' ')).filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+            match tagged {
+                Some((n, rest)) => match n.parse::<usize>().ok().and_then(|n| table.get(n.wrapping_sub(1))) {
+                    Some(&id) => lines.push(crate::buffer::Line { id: Some(id), text: rest.to_string() }),
+                    None => {
+                        bad += 1;
+                        lines.push(crate::buffer::Line::new(rest));
+                    }
+                },
+                None if raw.trim().is_empty() => {}
+                None => lines.push(crate::buffer::Line::new(raw)),
+            }
+        }
+        let Some(b) = self.buffers.get_mut(&dir) else { return };
+        b.snapshot();
+        b.lines = lines;
+        b.ensure_nonempty();
+        b.clamp();
+        if b.squash_noop() {
+            self.flash("no changes from the editor", MsgKind::Info);
+        } else if bad > 0 {
+            self.flash(format!("{bad} line(s) had an unknown /NNN tag and become new entries — :w to review"), MsgKind::Warn);
+        } else {
+            self.flash("listing updated from the editor — :w to review", MsgKind::Info);
+        }
+    }
+
+    /// Type paths into the origin pane (`gi`, finder `^s`, viewer `p`): no
+    /// Enter, so they land on the agent's or shell's input line.
+    fn send_paths(&mut self, paths: Vec<(PathBuf, Option<usize>)>) {
+        let Some(origin) = self.origin.clone() else {
+            self.flash("no origin pane — open herdr-oil from herdr to send paths", MsgKind::Warn);
+            return;
+        };
+        if paths.is_empty() {
+            self.flash("no saved entry here to send", MsgKind::Warn);
+            return;
+        }
+        let agent = crate::launch::panes().iter().any(|p| p.pane_id.as_deref() == Some(origin.as_str()) && p.agent.is_some());
+        let words = send_words(&paths, &self.start, agent);
+        if words.iter().any(|w| w.chars().any(char::is_control)) {
+            self.flash("name contains control characters — not sent", MsgKind::Err);
+            return;
+        }
+        let text = format!("{} ", words.join(" "));
+        match crate::launch::herdr(&["pane", "send-text", &origin, &text]) {
+            Ok(_) => {
+                let m = format!("sent {} path(s) to the origin pane", words.len());
+                if self.cfg.stay_open {
+                    self.flash(m, MsgKind::Ok);
+                } else if self.modified_dirs().is_empty() {
+                    self.quit = true;
+                } else {
+                    self.flash(format!("{m} — unsaved edits keep the explorer open"), MsgKind::Warn);
+                }
+            }
+            Err(e) => self.flash(format!("send failed: {e}"), MsgKind::Err),
+        }
+    }
+
+    /// `:chmod` — permission changes are not part of the edit plan, they
+    /// apply to the selected entries right away.
+    fn chmod(&mut self, spec: &str, ids: &[u64]) {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut done, mut errs) = (0, Vec::new());
+        for id in ids {
+            let Some(e) = self.store.get(*id).cloned() else { continue };
+            if matches!(e.kind, Kind::Link | Kind::LinkDir) {
+                continue;
+            }
+            let Some(mode) = chmod_mode(e.mode & 0o7777, spec) else {
+                self.flash(format!("chmod: bad mode {spec} (try +x, go-w, 644)"), MsgKind::Err);
+                return;
+            };
+            match std::fs::set_permissions(&e.path, std::fs::Permissions::from_mode(mode)) {
+                Ok(()) => {
+                    done += 1;
+                    if let Some(x) = self.store.entries.get_mut(id) {
+                        x.mode = (x.mode & !0o7777) | mode;
+                    }
+                }
+                Err(err) => errs.push(format!("{}: {err}", e.name)),
+            }
+        }
+        match errs.first() {
+            Some(e) => self.flash(format!("chmod {spec}: {done} ok, {e}"), MsgKind::Err),
+            None if done == 0 => self.flash("chmod: no saved entries on these lines", MsgKind::Warn),
+            None => self.flash(format!("chmod {spec}: {done} entr{}", if done == 1 { "y" } else { "ies" }), MsgKind::Ok),
         }
     }
 
@@ -561,8 +902,14 @@ impl App {
                 self.vim.msg = None;
                 let cwd = self.cwd.clone();
                 let b = self.buffers.get_mut(&cwd).unwrap();
+                let was_cmd = matches!(self.vim.mode, Mode::Cmd { .. });
                 let a = self.vim.handle(b, k);
                 b.follow();
+                if was_cmd || matches!(self.vim.mode, Mode::Cmd { .. }) {
+                    // the command line shows completions / live :s counts on
+                    // its right; each key replaces them
+                    self.msg = None;
+                }
                 if let Some(m) = self.vim.msg.take() {
                     self.flash(m, MsgKind::Info);
                 }
@@ -576,18 +923,18 @@ impl App {
     fn overlay_key(&mut self, k: KeyEvent) {
         let ov = std::mem::replace(&mut self.overlay, Overlay::None);
         match ov {
-            Overlay::Confirm { plan, mut scroll, then_quit } => match k.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.execute(plan, then_quit),
+            Overlay::Confirm { plan, mut scroll, then_quit, undo } => match k.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.execute(plan, then_quit, undo),
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => self.flash("cancelled — edits kept", MsgKind::Info),
                 KeyCode::Char('j') | KeyCode::Down => {
                     scroll += 1;
-                    self.overlay = Overlay::Confirm { plan, scroll, then_quit };
+                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo };
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     scroll = scroll.saturating_sub(1);
-                    self.overlay = Overlay::Confirm { plan, scroll, then_quit };
+                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo };
                 }
-                _ => self.overlay = Overlay::Confirm { plan, scroll, then_quit },
+                _ => self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo },
             },
             Overlay::QuitPrompt => match k.code {
                 KeyCode::Char('s') | KeyCode::Char('w') | KeyCode::Char('y') => self.save(true),
@@ -661,7 +1008,7 @@ impl App {
                     }
                     return;
                 }
-                (KeyCode::Char('v' | 'x' | 't' | 'e' | 'g' | 'o' | 'y' | ' '), true) => return,
+                (KeyCode::Char('v' | 'x' | 't' | 'e' | 'g' | 'o' | 'y' | 's' | ' '), true) => return,
                 _ => {}
             }
         }
@@ -678,7 +1025,7 @@ impl App {
                 return;
             }
             (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
-                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent];
+                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git];
                 let i = order.iter().position(|x| *x == f.kind).unwrap_or(0);
                 let n = if k.code == KeyCode::BackTab { (i + order.len() - 1) % order.len() } else { (i + 1) % order.len() };
                 f.set_kind(order[n]);
@@ -710,6 +1057,15 @@ impl App {
             (KeyCode::Char(' '), true, _) => {
                 f.toggle_mark();
                 f.move_sel(1);
+            }
+            (KeyCode::Char('s'), true, _) => {
+                let paths: Vec<(PathBuf, Option<usize>)> = if f.marked.is_empty() {
+                    f.selected().map(|it| (it.abs, it.line)).into_iter().collect()
+                } else {
+                    f.marked.iter().map(|p| (p.clone(), None)).collect()
+                };
+                self.send_paths(paths);
+                return;
             }
             (KeyCode::Char('r'), true, _) => {
                 let repo = finder::repo_root(&self.cwd);
@@ -795,12 +1151,72 @@ impl App {
         }
     }
 
+    /// Recompute viewer search hits and jump to the first one at/after `from`
+    /// (or before, going backwards).
+    fn viewer_find(&mut self, from: usize, forward: bool) {
+        let Some(v) = self.viewer.as_mut() else { return };
+        if v.search.is_empty() {
+            return;
+        }
+        let smart = v.search.chars().any(|c| c.is_uppercase());
+        let pat = if smart { v.search.clone() } else { v.search.to_lowercase() };
+        v.hits = self
+            .viewer_cache
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                if smart { t.contains(&pat) } else { t.to_lowercase().contains(&pat) }
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let hit = if forward { v.hits.iter().find(|&&h| h >= from).or(v.hits.first()) } else { v.hits.iter().rev().find(|&&h| h <= from).or(v.hits.last()) };
+        match hit.copied() {
+            Some(h) => {
+                let max_top = v.total.saturating_sub(v.height.max(1));
+                v.top = Some(h.saturating_sub(v.height / 3).min(max_top));
+                v.at = Some(h);
+                let i = v.hits.iter().position(|&x| x == h).unwrap_or(0);
+                let msg = format!("/{}  [{}/{}]", v.search, i + 1, v.hits.len());
+                self.flash(msg, MsgKind::Info);
+            }
+            None => {
+                v.at = None;
+                let msg = format!("pattern not found: {}", v.search);
+                self.flash(msg, MsgKind::Warn);
+            }
+        }
+    }
+
     fn viewer_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(v) = self.viewer.as_mut() else {
             self.view = View::Explorer;
             return;
         };
+        if let Some(t) = v.typing.as_mut() {
+            match k.code {
+                KeyCode::Esc => v.typing = None,
+                KeyCode::Enter => {
+                    let t = v.typing.take().unwrap_or_default();
+                    if !t.is_empty() {
+                        v.search = t;
+                    }
+                    let from = v.top.unwrap_or(0) + v.height / 3;
+                    self.viewer_find(from, true);
+                }
+                KeyCode::Backspace => {
+                    if t.pop().is_none() {
+                        v.typing = None;
+                    }
+                }
+                KeyCode::Char('u') if ctrl => t.clear(),
+                KeyCode::Char(c) if !ctrl => t.push(c),
+                _ => {}
+            }
+            return;
+        }
         let h = v.height.max(1);
         let max_top = v.total.saturating_sub(h);
         let top = v.top.unwrap_or(0);
@@ -834,6 +1250,28 @@ impl App {
                 Ok(()) => self.flash(format!("copied {}", finder::tilde(&path)), MsgKind::Ok),
                 Err(e) => self.flash(e, MsgKind::Err),
             },
+            (KeyCode::Char('/'), false) => v.typing = Some(String::new()),
+            (KeyCode::Char('p'), false) => {
+                // the current search hit (cache index → file line), else the line it was opened at
+                let start = line.map(|l| l.saturating_sub(crate::preview::VIEWER_LINES / 4).max(1)).unwrap_or(1);
+                let line = v.at.map(|i| start + i).or(line);
+                self.send_paths(vec![(path, line)]);
+            }
+            (KeyCode::Char('n') | KeyCode::Char('N'), false) => {
+                if v.search.is_empty() {
+                    self.flash("no search yet — / to search", MsgKind::Info);
+                    return;
+                }
+                // next/previous hit after the current one, or from the
+                // screen's focus line once it has been scrolled away
+                let fwd = k.code == KeyCode::Char('n');
+                let from = match v.at.filter(|&a| a >= top && a < top + h) {
+                    Some(a) if fwd => a + 1,
+                    Some(a) => a.wrapping_sub(1).min(v.total),
+                    None => top + h / 3,
+                };
+                self.viewer_find(from, fwd);
+            }
             _ => {}
         }
     }
@@ -963,6 +1401,7 @@ impl App {
             }
             if let Some(argv) = self.suspend.take() {
                 self.run_suspended(terminal, argv);
+                self.finish_edit_buffer();
             }
             if last_tick.elapsed() > Duration::from_millis(90) {
                 self.spinner = self.spinner.wrapping_add(1);
@@ -1065,5 +1504,103 @@ mod tests {
         app.finish_transfer(t.0.clone(), None);
         assert!(matches!(app.overlay, Overlay::None));
         assert!(app.modified_dirs().is_empty());
+    }
+
+    #[test]
+    fn chmod_specs() {
+        assert_eq!(chmod_mode(0o644, "+x"), Some(0o755));
+        assert_eq!(chmod_mode(0o755, "go-x"), Some(0o744));
+        assert_eq!(chmod_mode(0o777, "u=rw"), Some(0o677));
+        assert_eq!(chmod_mode(0o644, "600"), Some(0o600));
+        assert_eq!(chmod_mode(0o644, "+q"), None);
+        assert_eq!(chmod_mode(0o644, "999"), None);
+    }
+
+    #[test]
+    fn history_back_and_forward() {
+        let (t, mut app) = app_in("hist");
+        app.goto(&t.0.join("src"), None);
+        app.goto(&t.0.join("src/deep"), None);
+        app.act(Action::HistBack);
+        assert_eq!(app.cwd, t.0.join("src"));
+        app.act(Action::HistBack);
+        assert_eq!(app.cwd, t.0);
+        app.act(Action::HistFwd);
+        assert_eq!(app.cwd, t.0.join("src"));
+        app.goto(&t.0, None);
+        app.act(Action::HistFwd);
+        assert_eq!(app.cwd, t.0, "a new jump clears forward history");
+    }
+
+    #[test]
+    fn marks_persist() {
+        let (t, mut app) = app_in("marks");
+        app.goto(&t.0.join("src"), None);
+        app.act(Action::SetMark('w'));
+        app.goto(&t.0, None);
+        app.act(Action::JumpMark('w'));
+        assert_eq!(app.cwd, t.0.join("src"));
+        assert_eq!(load_marks(&app.cfg).get(&'w'), Some(&t.0.join("src")));
+    }
+
+    #[test]
+    fn chmod_applies_to_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let (t, mut app) = app_in("chmod");
+        let id = app.buf().lines[row_of(&app, "a.txt")].id.unwrap();
+        app.act(Action::Chmod { spec: "+x".into(), ids: vec![id] });
+        let mode = std::fs::metadata(t.0.join("a.txt")).unwrap().permissions().mode();
+        assert_ne!(mode & 0o100, 0);
+    }
+
+    #[test]
+    fn edit_listing_roundtrip() {
+        let (t, mut app) = app_in("ebuf");
+        app.act(Action::EditBuffer);
+        let (path, _, _) = app.edit_file.clone().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("/001 ") && text.contains(" a.txt\n"), "{text}");
+        // what an editor would do: rename a, drop b, add a line
+        let edited: String = text
+            .lines()
+            .filter(|l| !l.ends_with(" b.txt"))
+            .map(|l| format!("{}\n", l.replace(" a.txt", " alpha.txt")))
+            .chain(std::iter::once("new.md\n".to_string()))
+            .collect();
+        std::fs::write(&path, edited).unwrap();
+        app.suspend = None;
+        app.finish_edit_buffer();
+        assert!(!path.exists());
+        let plan = plan::build(app.buffers.values(), &app.store);
+        assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+        assert!(plan.ops.contains(&plan::Op::Move { src: t.0.join("a.txt"), dst: t.0.join("alpha.txt"), dir: false }));
+        assert!(plan.ops.contains(&plan::Op::Create { dst: t.0.join("new.md"), dir: false }));
+        assert_eq!(plan.deletes(), 1);
+        // one undo step brings the listing back
+        app.buf_mut().undo();
+        assert!(app.modified_dirs().is_empty());
+    }
+
+    #[test]
+    fn undo_last_apply() {
+        let (t, mut app) = app_in("undo-apply");
+        app.cfg.confirm = false;
+        let r = row_of(&app, "a.txt");
+        app.buf_mut().lines[r].text = "z.txt".into();
+        app.act(Action::Save);
+        assert!(t.0.join("z.txt").exists());
+        app.act(Action::UndoApply);
+        let Overlay::Confirm { plan, undo: true, .. } = &app.overlay else { panic!("no undo dialog") };
+        assert_eq!(plan.ops, vec![plan::Op::Move { src: t.0.join("z.txt"), dst: t.0.join("a.txt"), dir: false }]);
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(t.0.join("a.txt").exists() && !t.0.join("z.txt").exists());
+    }
+
+    #[test]
+    fn send_formats() {
+        let start = Path::new("/r");
+        let ps = vec![(PathBuf::from("/r/src/app.rs"), Some(42)), (PathBuf::from("/elsewhere/a b"), None)];
+        assert_eq!(send_words(&ps, start, true), ["@src/app.rs:42", "@/elsewhere/a b"]);
+        assert_eq!(send_words(&ps[1..], start, false), [open::sh_quote("/elsewhere/a b")]);
     }
 }

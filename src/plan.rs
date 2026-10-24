@@ -5,7 +5,9 @@
 //!   - nowhere                       → delete
 //!   - at its original path (+ more) → keep, every other spot is a copy
 //!   - elsewhere only                → the first spot is a move, the rest copies
-//! Lines without an id are creates (`name/` → directory, `a/b/c` → nested).
+//! Lines without an id are creates (`name/` → directory, `a/b/c` → nested,
+//! `name -> target` → symlink). Changing the `-> target` of a listed
+//! symlink retargets it.
 
 use crate::buffer::Buffer;
 use crate::entry::Store;
@@ -18,32 +20,38 @@ pub enum Op {
     Move { src: PathBuf, dst: PathBuf, dir: bool },
     Copy { src: PathBuf, dst: PathBuf, dir: bool },
     Delete { src: PathBuf, dir: bool },
+    /// New symlink at `dst` pointing to `target`.
+    Link { dst: PathBuf, target: String },
+    /// Point the symlink at `path` (where it ends up after moves) elsewhere.
+    Retarget { path: PathBuf, target: String },
 }
 
 impl Op {
     pub fn src(&self) -> Option<&Path> {
         match self {
             Op::Move { src, .. } | Op::Copy { src, .. } | Op::Delete { src, .. } => Some(src),
-            Op::Create { .. } => None,
+            Op::Create { .. } | Op::Link { .. } | Op::Retarget { .. } => None,
         }
     }
     pub fn dst(&self) -> Option<&Path> {
         match self {
-            Op::Move { dst, .. } | Op::Copy { dst, .. } | Op::Create { dst, .. } => Some(dst),
-            Op::Delete { .. } => None,
+            Op::Move { dst, .. } | Op::Copy { dst, .. } | Op::Create { dst, .. } | Op::Link { dst, .. } => Some(dst),
+            Op::Delete { .. } | Op::Retarget { .. } => None,
         }
     }
     pub fn is_dir(&self) -> bool {
         match self {
             Op::Create { dir, .. } | Op::Move { dir, .. } | Op::Copy { dir, .. } | Op::Delete { dir, .. } => *dir,
+            Op::Link { .. } | Op::Retarget { .. } => false,
         }
     }
-    fn rank(&self) -> u8 {
+    pub fn rank(&self) -> u8 {
         match self {
-            Op::Create { .. } => 0,
+            Op::Create { .. } | Op::Link { .. } => 0,
             Op::Move { .. } => 1,
             Op::Copy { .. } => 2,
-            Op::Delete { .. } => 3,
+            Op::Retarget { .. } => 3,
+            Op::Delete { .. } => 4,
         }
     }
 }
@@ -87,6 +95,14 @@ pub fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// Split `name -> target` (a symlink line) into its name and target.
+pub fn split_link(text: &str) -> (&str, Option<&str>) {
+    match text.split_once(" -> ") {
+        Some((a, b)) => (a, Some(b.trim())),
+        None => (text, None),
+    }
+}
+
 /// Parse a buffer line into (relative path, wants-dir). `None` for blank.
 pub fn parse_name(text: &str) -> Result<Option<(PathBuf, bool)>, String> {
     let t = text.trim();
@@ -118,16 +134,22 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
     let mut bufs: Vec<&Buffer> = buffers.into_iter().collect();
     bufs.sort_by(|a, b| a.dir.cmp(&b.dir));
     let mut plan = Plan::default();
-    // id → destinations (in buffer order)
-    let mut occ: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    let mut creates: Vec<(PathBuf, bool)> = Vec::new();
+    // id → destinations (in buffer order), with a `-> target` if given
+    let mut occ: HashMap<u64, Vec<(PathBuf, Option<String>)>> = HashMap::new();
+    let mut creates: Vec<(PathBuf, bool, Option<String>)> = Vec::new();
 
     for b in &bufs {
         for (i, line) in b.lines.iter().enumerate() {
             if !line.significant() {
                 continue;
             }
-            let parsed = match parse_name(&line.text) {
+            let (name, target) = split_link(&line.text);
+            if target == Some("") {
+                plan.errors.push(format!("{}: line {}: missing symlink target after ->", short(&b.dir), i + 1));
+                continue;
+            }
+            let target = target.map(str::to_string);
+            let parsed = match parse_name(name) {
                 Ok(Some(p)) => p,
                 Ok(None) => {
                     if line.id.is_some() {
@@ -146,8 +168,15 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
             };
             let dst = normalize(&b.dir.join(&parsed.0));
             match line.id {
-                Some(id) if store.get(id).is_some() => occ.entry(id).or_default().push(dst),
-                _ => creates.push((dst, parsed.1)),
+                Some(id) if store.get(id).is_some() => {
+                    let e = store.get(id).unwrap();
+                    if target.is_some() && e.link_target.is_none() {
+                        plan.errors.push(format!("{}: line {}: {} is not a symlink — `-> target` only works on links and new lines", short(&b.dir), i + 1, e.name));
+                        continue;
+                    }
+                    occ.entry(id).or_default().push((dst, target))
+                }
+                _ => creates.push((dst, parsed.1, target)),
             }
         }
     }
@@ -164,16 +193,17 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
                 plan.ops.push(Op::Delete { src, dir });
                 continue;
             }
-            if spots.iter().any(|d| *d == src) {
-                for d in spots.into_iter().filter(|d| *d != src) {
+            retargets(&mut plan, e.link_target.as_deref(), &spots);
+            if spots.iter().any(|(d, _)| *d == src) {
+                for (d, _) in spots.into_iter().filter(|(d, _)| *d != src) {
                     plan.ops.push(Op::Copy { src: src.clone(), dst: d, dir });
                 }
                 continue;
             }
             // Prefer a destination in the same parent (a rename) for the move.
             let parent = src.parent().map(Path::to_path_buf);
-            let mi = spots.iter().position(|d| d.parent().map(Path::to_path_buf) == parent).unwrap_or(0);
-            for (i, d) in spots.into_iter().enumerate() {
+            let mi = spots.iter().position(|(d, _)| d.parent().map(Path::to_path_buf) == parent).unwrap_or(0);
+            for (i, (d, _)) in spots.into_iter().enumerate() {
                 if i == mi {
                     plan.ops.push(Op::Move { src: src.clone(), dst: d, dir });
                 } else {
@@ -187,18 +217,31 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
     orphans.sort_by_key(|(id, _)| **id);
     for (id, spots) in orphans {
         let e = store.get(*id).unwrap();
-        for d in spots {
+        retargets(&mut plan, e.link_target.as_deref(), spots);
+        for (d, _) in spots {
             if *d != e.path {
                 plan.ops.push(Op::Copy { src: e.path.clone(), dst: d.clone(), dir: e.kind.is_dir() });
             }
         }
     }
-    for (dst, dir) in creates {
-        plan.ops.push(Op::Create { dst, dir });
+    for (dst, dir, target) in creates {
+        match target {
+            Some(target) => plan.ops.push(Op::Link { dst, target }),
+            None => plan.ops.push(Op::Create { dst, dir }),
+        }
     }
-    plan.ops.sort_by(|a, b| a.rank().cmp(&b.rank()));
+    plan.ops.sort_by_key(Op::rank);
     validate(&mut plan);
     plan
+}
+
+/// A symlink line whose `-> target` changed: retarget it where it lands.
+fn retargets(plan: &mut Plan, old: Option<&str>, spots: &[(PathBuf, Option<String>)]) {
+    for (d, t) in spots {
+        if let Some(t) = t.as_deref().filter(|t| Some(*t) != old) {
+            plan.ops.push(Op::Retarget { path: d.clone(), target: t.to_string() });
+        }
+    }
 }
 
 fn short(p: &Path) -> String {

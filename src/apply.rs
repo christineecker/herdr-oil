@@ -6,8 +6,11 @@
 //!    swaps (a↔b), case-only renames and "move child out, delete parent" work,
 //! 3. creates and staged entries land at their final paths, shallowest
 //!    first, with destinations re-rooted under directories that moved.
+//! 4. symlinks are retargeted where they ended up.
 //! Nothing is overwritten: an occupied destination is reported and the
-//! staged entry is left where it is (named in the report).
+//! staged entry is left where it is (named in the report). Every step that
+//! succeeds records its inverse in `Report::undo`, so the batch can be
+//! rolled back (`U`) by applying those ops.
 
 use crate::config::DeleteMethod;
 use crate::plan::{key, Op};
@@ -22,6 +25,11 @@ pub struct Report {
     pub errors: Vec<String>,
     /// Final paths of everything created/moved/copied.
     pub landed: Vec<PathBuf>,
+    /// Ops that reverse what was done (deletes of new entries go to Trash,
+    /// trashed entries come back, moves go home, links get their old target).
+    pub undo: Vec<Op>,
+    /// Permanent deletes, which no undo can bring back.
+    pub permanent: usize,
 }
 
 fn depth(p: &Path) -> usize {
@@ -175,6 +183,7 @@ impl Ctx {
 enum Landing {
     Staged(PathBuf),
     Create(bool),
+    Link(String),
 }
 
 pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
@@ -194,14 +203,15 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
             _ => {}
         }
     }
-    let mut landings: Vec<(PathBuf, Landing, Option<PathBuf>)> = Vec::new();
+    // (destination, what lands there, moved-from path, is a dir)
+    let mut landings: Vec<(PathBuf, Landing, Option<PathBuf>, bool)> = Vec::new();
 
     // 1. copies
     for op in ops {
-        if let Op::Copy { src, dst, .. } = op {
+        if let Op::Copy { src, dst, dir } = op {
             let stage = ctx.stage_path(src);
             match copy_recursive(src, &stage) {
-                Ok(()) => landings.push((dst.clone(), Landing::Staged(stage), None)),
+                Ok(()) => landings.push((dst.clone(), Landing::Staged(stage), None, *dir)),
                 Err(e) => {
                     let _ = remove_any(&stage);
                     rep.errors.push(format!("copy {}: {e}", src.display()));
@@ -215,25 +225,31 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
     md.sort_by_key(|o| std::cmp::Reverse(depth(o.src().unwrap())));
     for op in md {
         match op {
-            Op::Move { src, dst, .. } => {
+            Op::Move { src, dst, dir } => {
                 let stage = ctx.stage_path(src);
                 match move_path(src, &stage) {
-                    Ok(()) => landings.push((dst.clone(), Landing::Staged(stage), Some(src.clone()))),
+                    Ok(()) => landings.push((dst.clone(), Landing::Staged(stage), Some(src.clone()), *dir)),
                     Err(e) => rep.errors.push(format!("move {}: {e}", src.display())),
                 }
             }
-            Op::Delete { src, .. } => {
+            Op::Delete { src, dir } => {
                 let under_deleted = src.ancestors().skip(1).any(|a| deleted.contains(&key(a)));
                 if under_deleted {
                     rep.done += 1;
                     continue;
                 }
                 let r = match method {
-                    DeleteMethod::Trash => trash(src).map(|_| ()),
-                    DeleteMethod::Permanent => remove_any(src),
+                    DeleteMethod::Trash => trash(src).map(Some),
+                    DeleteMethod::Permanent => remove_any(src).map(|_| None),
                 };
                 match r {
-                    Ok(()) => rep.done += 1,
+                    Ok(t) => {
+                        rep.done += 1;
+                        match t {
+                            Some(t) => rep.undo.push(Op::Move { src: t, dst: src.clone(), dir: *dir }),
+                            None => rep.permanent += 1,
+                        }
+                    }
                     Err(e) => rep.errors.push(format!("delete {}: {e}", src.display())),
                 }
             }
@@ -243,16 +259,24 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
 
     // 3. land creates + staged entries, shallowest final path first
     for op in ops {
-        if let Op::Create { dst, dir } = op {
-            landings.push((dst.clone(), Landing::Create(*dir), None));
+        match op {
+            Op::Create { dst, dir } => landings.push((dst.clone(), Landing::Create(*dir), None, *dir)),
+            Op::Link { dst, target } => landings.push((dst.clone(), Landing::Link(target.clone()), None, false)),
+            _ => {}
         }
     }
-    let mut finals: Vec<(PathBuf, Landing, Option<PathBuf>)> =
-        landings.into_iter().map(|(d, l, s)| (ctx.final_dst(&d, 0), l, s)).collect();
-    finals.sort_by_key(|(d, _, _)| depth(d));
-    for (dst, landing, orig) in finals {
+    let mut finals: Vec<(PathBuf, Landing, Option<PathBuf>, bool)> =
+        landings.into_iter().map(|(d, l, s, dir)| (ctx.final_dst(&d, 0), l, s, dir)).collect();
+    finals.sort_by_key(|(d, _, _, _)| depth(d));
+    for (dst, landing, orig, dir) in finals {
         if let Some(parent) = dst.parent() {
-            if let Err(e) = fs::create_dir_all(parent) {
+            // topmost folder this creates, so an undo removes it again
+            let made = parent.ancestors().take_while(|a| fs::symlink_metadata(a).is_err()).last().map(Path::to_path_buf);
+            let r = fs::create_dir_all(parent);
+            if let (Ok(()), Some(m)) = (&r, made) {
+                rep.undo.push(Op::Delete { src: m, dir: true });
+            }
+            if let Err(e) = r {
                 rep.errors.push(format!("mkdir {}: {e}", parent.display()));
                 if let Landing::Staged(s) = &landing {
                     rep.errors.push(format!("  kept at {}", s.display()));
@@ -263,6 +287,7 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
         let res = match &landing {
             Landing::Create(true) => fs::create_dir(&dst),
             Landing::Create(false) => fs::OpenOptions::new().write(true).create_new(true).open(&dst).map(|_| ()),
+            Landing::Link(target) => std::os::unix::fs::symlink(target, &dst),
             Landing::Staged(stage) => {
                 if fs::symlink_metadata(&dst).is_ok() {
                     Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination exists"))
@@ -274,6 +299,10 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
         match res {
             Ok(()) => {
                 rep.done += 1;
+                rep.undo.push(match &orig {
+                    Some(o) => Op::Move { src: dst.clone(), dst: o.clone(), dir },
+                    None => Op::Delete { src: dst.clone(), dir },
+                });
                 rep.landed.push(dst);
             }
             Err(e) => {
@@ -289,6 +318,34 @@ pub fn apply(ops: &[Op], method: DeleteMethod) -> Report {
             }
         }
     }
+
+    // 4. retarget symlinks: a new link beside the old one, renamed over it
+    for op in ops {
+        let Op::Retarget { path, target } = op else { continue };
+        let at = ctx.final_dst(path, 0);
+        let old = match fs::read_link(&at) {
+            Ok(t) => t,
+            Err(e) => {
+                rep.errors.push(format!("relink {}: {e}", at.display()));
+                continue;
+            }
+        };
+        ctx.n += 1;
+        let tmp = at.with_file_name(format!(".herdr-oil~{}-{}", std::process::id(), ctx.n));
+        let r = std::os::unix::fs::symlink(target, &tmp).and_then(|_| fs::rename(&tmp, &at));
+        match r {
+            Ok(()) => {
+                rep.done += 1;
+                rep.undo.push(Op::Retarget { path: at, target: old.display().to_string() });
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                rep.errors.push(format!("relink {}: {e}", at.display()));
+            }
+        }
+    }
+    // undo runs the newest step first
+    rep.undo.reverse();
     rep
 }
 
@@ -400,5 +457,79 @@ mod tests {
         let r = apply(&p.ops, DeleteMethod::Permanent);
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert_eq!(names(&t.0), ["dir"]);
+    }
+
+    #[test]
+    fn symlinks_create_and_retarget() {
+        let t = tmpdir("apply-links");
+        fs::write(t.0.join("dev.toml"), "").unwrap();
+        fs::write(t.0.join("prod.toml"), "").unwrap();
+        std::os::unix::fs::symlink("dev.toml", t.0.join("current.toml")).unwrap();
+        let mut store = Store::default();
+        let mut b = Buffer::load(&t.0, &mut store, false, Sort::Name, false);
+        assert!(b.lines.iter().any(|l| l.text == "current.toml -> dev.toml"));
+        set(&mut b, "current.toml -> dev.toml", "current.toml -> prod.toml");
+        b.lines.push(Line::new("latest -> prod.toml"));
+        let p = build([&b], &store);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(
+            p.ops,
+            vec![
+                Op::Link { dst: t.0.join("latest"), target: "prod.toml".into() },
+                Op::Retarget { path: t.0.join("current.toml"), target: "prod.toml".into() },
+            ]
+        );
+        let r = apply(&p.ops, DeleteMethod::Permanent);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(fs::read_link(t.0.join("current.toml")).unwrap(), PathBuf::from("prod.toml"));
+        assert_eq!(fs::read_link(t.0.join("latest")).unwrap(), PathBuf::from("prod.toml"));
+        // and back
+        let u = apply(&r.undo, DeleteMethod::Permanent);
+        assert!(u.errors.is_empty(), "{:?}", u.errors);
+        assert_eq!(fs::read_link(t.0.join("current.toml")).unwrap(), PathBuf::from("dev.toml"));
+        assert!(fs::symlink_metadata(t.0.join("latest")).is_err());
+    }
+
+    #[test]
+    fn target_on_a_plain_file_is_an_error() {
+        let t = tmpdir("apply-notlink");
+        fs::write(t.0.join("a"), "").unwrap();
+        let mut store = Store::default();
+        let mut b = Buffer::load(&t.0, &mut store, false, Sort::Name, false);
+        set(&mut b, "a", "a -> b");
+        assert!(build([&b], &store).errors.iter().any(|e| e.contains("not a symlink")));
+    }
+
+    #[test]
+    fn undo_restores_previous_state() {
+        let t = tmpdir("apply-undo");
+        fs::create_dir(t.0.join("sub")).unwrap();
+        fs::write(t.0.join("sub/x"), "X").unwrap();
+        fs::write(t.0.join("a"), "A").unwrap();
+        fs::write(t.0.join("b"), "B").unwrap();
+        let mut store = Store::default();
+        let mut root = Buffer::load(&t.0, &mut store, false, Sort::Name, false);
+        let mut sub = Buffer::load(&t.0.join("sub"), &mut store, false, Sort::Name, false);
+        set(&mut root, "sub/", "renamed/");
+        set(&mut root, "a", "b2");
+        set(&mut root, "b", "a");
+        set(&mut root, "b2", "b");
+        set(&mut sub, "x", "y");
+        sub.lines.push(Line::new("made/deep/new.txt"));
+        let p = build([&root, &sub], &store);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        let r = apply(&p.ops, DeleteMethod::Permanent);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(names(&t.0), ["a", "b", "renamed"]);
+        let u = apply(&r.undo, DeleteMethod::Permanent);
+        assert!(u.errors.is_empty(), "{:?}", u.errors);
+        assert_eq!(names(&t.0), ["a", "b", "sub"]);
+        assert_eq!(names(&t.0.join("sub")), ["x"]);
+        assert_eq!(fs::read_to_string(t.0.join("a")).unwrap(), "A");
+        // the undo's own journal redoes
+        let again = apply(&u.undo, DeleteMethod::Permanent);
+        assert!(again.errors.is_empty(), "{:?}", again.errors);
+        assert_eq!(fs::read_to_string(t.0.join("renamed/y")).unwrap(), "X");
+        assert_eq!(fs::read_to_string(t.0.join("a")).unwrap(), "B");
     }
 }

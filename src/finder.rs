@@ -26,6 +26,8 @@ pub struct Item {
     pub indices: Vec<u32>,
     pub is_dir: bool,
     pub grep_text: Option<String>,
+    /// Git tab: one-letter status (M A D R U ?).
+    pub git: Option<char>,
 }
 
 pub struct Finder {
@@ -47,6 +49,8 @@ pub struct Finder {
     pub dirty: Arc<AtomicBool>,
     grep: Grep,
     recent_file: PathBuf,
+    /// Git tab: status per root-relative path; None outside a repository.
+    pub git: Option<std::collections::HashMap<String, char>>,
 }
 
 struct Grep {
@@ -60,6 +64,32 @@ struct Grep {
 }
 
 const GREP_CAP: usize = 5000;
+
+/// Split a grep query into the pattern and ripgrep filters given after
+/// ` -- `: `-t rust` / `-T md` (types), `-g x` or a bare `*.rs` (globs).
+/// Only these become arguments, never arbitrary flags.
+pub fn grep_query(q: &str) -> (String, Vec<String>) {
+    let Some((pat, rest)) = q.split_once(" -- ") else { return (q.to_string(), vec![]) };
+    let mut out = Vec::new();
+    let mut toks = rest.split_whitespace();
+    while let Some(t) = toks.next() {
+        let (flag, val) = match t {
+            "-t" | "-T" | "-g" => (t, toks.next().unwrap_or("")),
+            _ if t.len() > 2 && (t.starts_with("-t") || t.starts_with("-T") || t.starts_with("-g")) => t.split_at(2),
+            _ if t.starts_with('-') => continue,
+            _ => ("-g", t),
+        };
+        if val.is_empty() {
+            continue;
+        }
+        out.push(match flag {
+            "-t" => format!("--type={val}"),
+            "-T" => format!("--type-not={val}"),
+            _ => format!("--glob={val}"),
+        });
+    }
+    (pat.to_string(), out)
+}
 
 fn rg_available() -> bool {
     static RG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -121,6 +151,7 @@ impl Finder {
                 truncated: Arc::new(AtomicBool::new(false)),
             },
             recent_file: cfg.state_dir.join("recent.txt"),
+            git: None,
         };
         f.restart();
         f
@@ -204,6 +235,14 @@ impl Finder {
             }
             FinderKind::Grep => {
                 self.grep.changed_at = Instant::now() - Duration::from_secs(1);
+            }
+            FinderKind::Git => {
+                let changes = crate::entry::git_changes(&self.root);
+                let inj = self.nucleo.injector();
+                for (_, p) in changes.iter().flatten() {
+                    inj.push(p.clone(), |s, cols| cols[0] = s.as_str().into());
+                }
+                self.git = changes.map(|v| v.into_iter().map(|(c, p)| (p, c)).collect());
             }
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -317,7 +356,8 @@ impl Finder {
         self.grep.truncated.store(false, Ordering::Relaxed);
         let q = self.query.clone();
         self.grep.launched = Some(q.clone());
-        if q.trim().is_empty() {
+        let (pat, filters) = grep_query(&q);
+        if pat.trim().is_empty() {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
@@ -333,10 +373,12 @@ impl Finder {
             if self.no_ignore {
                 cmd.arg("--no-ignore");
             }
-            cmd.arg("--").arg(&q).arg(".");
+            cmd.args(&filters).arg("--").arg(&pat).arg(".");
         } else {
             cmd = Command::new("grep");
-            cmd.args(["-rnI", "--exclude-dir=.git", "-i", "-e"]).arg(&q).arg(".");
+            cmd.args(["-rnI", "--exclude-dir=.git", "-i"]);
+            cmd.args(filters.iter().filter_map(|f| f.strip_prefix("--glob=")).map(|g| format!("--include={g}")));
+            cmd.arg("-e").arg(&pat).arg(".");
         }
         cmd.current_dir(&self.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = cmd.spawn() else { return };
@@ -411,7 +453,7 @@ impl Finder {
                 .iter()
                 .map(|h| {
                     let rel = h.path.strip_prefix(&self.root).unwrap_or(&h.path).display().to_string();
-                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()) }
+                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None }
                 })
                 .collect();
         }
@@ -429,7 +471,8 @@ impl Finder {
             } else {
                 plan_normalize(&self.root.join(s.trim_end_matches('/')))
             };
-            out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None });
+            let git = self.git.as_ref().filter(|_| self.kind == FinderKind::Git).and_then(|m| m.get(&s).copied());
+            out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None, git });
         }
         out
     }
@@ -529,6 +572,32 @@ pub fn push_recent(state_dir: &Path, paths: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_tab_lists_changes() {
+        let t = crate::plan::tests::tmpdir("finder-git");
+        let git = |args: &[&str]| Command::new("git").args(args).current_dir(&t.0).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(t.0.join("new.rs"), "x").unwrap();
+        let cfg = crate::config::Config::default();
+        let mut f = Finder::new(FinderKind::Git, t.0.clone(), &cfg);
+        let t0 = Instant::now();
+        while f.len() < 1 && t0.elapsed() < Duration::from_secs(5) {
+            f.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let it = f.selected().unwrap();
+        assert_eq!((it.display.as_str(), it.git), ("new.rs", Some('?')));
+    }
+
+    #[test]
+    fn grep_filters() {
+        assert_eq!(grep_query("foo"), ("foo".to_string(), vec![]));
+        assert_eq!(
+            grep_query("fn main -- *.rs -t py -Tmd --exec x"),
+            ("fn main".to_string(), vec!["--glob=*.rs".to_string(), "--type=py".to_string(), "--type-not=md".to_string(), "--glob=x".to_string()])
+        );
+    }
 
     #[test]
     fn parses_grep_lines() {

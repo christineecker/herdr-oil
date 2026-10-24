@@ -20,6 +20,10 @@ impl Line {
     pub fn chars(&self) -> usize {
         self.text.chars().count()
     }
+    /// The entry name on the line: no trailing slash, no `-> target`.
+    pub fn name(&self) -> &str {
+        crate::plan::split_link(&self.text).0.trim().trim_end_matches('/')
+    }
     /// The line counts for planning: blank new lines are ignored.
     pub fn significant(&self) -> bool {
         self.id.is_some() || !self.text.trim().is_empty()
@@ -48,6 +52,8 @@ pub struct Buffer {
     pub error: Option<String>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
+    /// Bumped on every snapshot: lets `.` tell which keys changed the text.
+    pub edits: u64,
 }
 
 /// Byte offset of char index `ci` in `s` (clamped to the end).
@@ -71,6 +77,7 @@ impl Buffer {
             error: None,
             undo: vec![],
             redo: vec![],
+            edits: 0,
         };
         b.reload(store, hidden, sort, git);
         b
@@ -117,7 +124,7 @@ impl Buffer {
             return;
         }
         let mut es: Vec<Entry> = self.original.iter().filter_map(|id| store.get(*id).cloned()).collect();
-        crate::entry::sort_entries(&mut es, sort);
+        crate::entry::sort_entries(&mut es, sort, store.reverse);
         self.original = es.iter().map(|e| e.id).collect();
         self.lines = es.iter().map(|e| Line { id: Some(e.id), text: e.display() }).collect();
         if self.lines.is_empty() {
@@ -143,6 +150,7 @@ impl Buffer {
     }
 
     pub fn snapshot(&mut self) {
+        self.edits += 1;
         self.undo.push(Snap { lines: self.lines.clone(), row: self.row, col: self.col });
         if self.undo.len() > 500 {
             self.undo.remove(0);
@@ -151,10 +159,13 @@ impl Buffer {
     }
 
     /// Drop the last snapshot if nothing changed since (e.g. `i` then Esc).
-    pub fn squash_noop(&mut self) {
+    /// True when it was dropped.
+    pub fn squash_noop(&mut self) -> bool {
         if self.undo.last().is_some_and(|s| s.lines == self.lines) {
             self.undo.pop();
+            return true;
         }
+        false
     }
 
     pub fn undo(&mut self) -> bool {
@@ -213,7 +224,7 @@ impl Buffer {
     pub fn cur_entry<'a>(&self, store: &'a Store) -> Option<&'a Entry> {
         let l = self.cur();
         let e = store.get(l.id?)?;
-        (l.text.trim().trim_end_matches('/') == e.name).then_some(e)
+        (l.name() == e.name).then_some(e)
     }
 
     // ── text primitives (char indices) ──────────────────────────────────────
@@ -287,6 +298,7 @@ mod tests {
             error: None,
             undo: vec![],
             redo: vec![],
+            edits: 0,
         }
     }
 

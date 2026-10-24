@@ -37,12 +37,13 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Text shown (and edited) in the buffer: dirs get a trailing slash.
+    /// Text shown (and edited) in the buffer: dirs get a trailing slash,
+    /// symlinks their target (`name -> target`, editable).
     pub fn display(&self) -> String {
-        if self.kind.is_dir() {
-            format!("{}/", self.name)
-        } else {
-            self.name.clone()
+        let base = if self.kind.is_dir() { format!("{}/", self.name) } else { self.name.clone() };
+        match &self.link_target {
+            Some(t) => format!("{base} -> {t}"),
+            None => base,
         }
     }
     pub fn is_exec(&self) -> bool {
@@ -82,6 +83,8 @@ impl Sort {
 #[derive(Default)]
 pub struct Store {
     next: u64,
+    /// Reverse the sort order (dirs still come first).
+    pub reverse: bool,
     pub entries: HashMap<u64, Entry>,
     by_path: HashMap<PathBuf, u64>,
 }
@@ -122,10 +125,13 @@ impl Store {
             }
             items.push(stat_entry(&de.path(), name));
         }
-        sort_entries(&mut items, sort);
+        sort_entries(&mut items, sort, self.reverse);
         Ok(items.into_iter().map(|e| self.intern(e)).collect())
     }
 }
+
+/// Directory child counts stop here and show as "1k+ items".
+pub const CHILD_CAP: usize = 1000;
 
 pub fn stat_entry(path: &Path, name: String) -> Entry {
     let lmeta = fs::symlink_metadata(path).ok();
@@ -151,7 +157,8 @@ pub fn stat_entry(path: &Path, name: String) -> Entry {
             kind = Kind::File;
         }
     }
-    let children = if kind.is_dir() { fs::read_dir(path).ok().map(|rd| rd.take(100_000).count()) } else { None };
+    // Counting runs on the UI thread: cap it so node_modules-sized folders stay instant.
+    let children = if kind.is_dir() { fs::read_dir(path).ok().map(|rd| rd.take(CHILD_CAP).count()) } else { None };
     Entry { id: 0, path: path.to_path_buf(), name, kind, size, mtime, mode, link_target, children }
 }
 
@@ -162,18 +169,16 @@ fn ext_of(name: &str) -> &str {
     }
 }
 
-pub fn sort_entries(v: &mut [Entry], sort: Sort) {
+pub fn sort_entries(v: &mut [Entry], sort: Sort, reverse: bool) {
     v.sort_by(|a, b| {
-        b.kind
-            .is_dir()
-            .cmp(&a.kind.is_dir())
-            .then_with(|| match sort {
-                Sort::Name => std::cmp::Ordering::Equal,
-                Sort::Mtime => b.mtime.cmp(&a.mtime),
-                Sort::Size => b.size.cmp(&a.size),
-                Sort::Ext => ext_of(&a.name).to_lowercase().cmp(&ext_of(&b.name).to_lowercase()),
-            })
-            .then_with(|| natural_cmp(&a.name, &b.name))
+        let o = match sort {
+            Sort::Name => std::cmp::Ordering::Equal,
+            Sort::Mtime => b.mtime.cmp(&a.mtime),
+            Sort::Size => b.size.cmp(&a.size),
+            Sort::Ext => ext_of(&a.name).to_lowercase().cmp(&ext_of(&b.name).to_lowercase()),
+        }
+        .then_with(|| natural_cmp(&a.name, &b.name));
+        b.kind.is_dir().cmp(&a.kind.is_dir()).then(if reverse { o.reverse() } else { o })
     });
 }
 
@@ -238,7 +243,7 @@ pub fn human_size(n: u64) -> String {
 pub fn size_label(e: &Entry) -> String {
     match (e.kind.is_dir(), e.children) {
         (true, Some(1)) => "1 item".into(),
-        (true, Some(n)) if n >= 100_000 => "100k+ items".into(),
+        (true, Some(n)) if n >= CHILD_CAP => "1k+ items".into(),
         (true, Some(n)) => format!("{n} items"),
         (true, None) => String::new(),
         _ => human_size(e.size),
@@ -359,7 +364,7 @@ pub enum IconColor {
 /// may run clean filters, so a repository that carries its own config (an
 /// unpacked archive, a shared folder; local, worktree or included files)
 /// could make us execute arbitrary commands. Reading config never runs filters.
-fn repo_defines_filters(dir: &Path) -> bool {
+pub fn repo_defines_filters(dir: &Path) -> bool {
     let out = std::process::Command::new("git")
         .args(["config", "--list", "--show-scope", "--includes", "--name-only"])
         .current_dir(dir)
@@ -378,10 +383,12 @@ fn repo_defines_filters(dir: &Path) -> bool {
     })
 }
 
-pub fn git_status(dir: &Path) -> HashMap<String, char> {
-    let mut map = HashMap::new();
+/// `git status --porcelain=v1 -z` records for `dir` (paths relative to it),
+/// run with every hook/filter/external-diff knob off. `None` outside a repo
+/// or when the repository carries its own filters.
+fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Vec<(String, String)>> {
     if repo_defines_filters(dir) {
-        return map;
+        return None;
     }
     let out = std::process::Command::new("git")
         .args([
@@ -401,18 +408,18 @@ pub fn git_status(dir: &Path) -> HashMap<String, char> {
             "--no-renames",
             "--porcelain=v1",
             "-z",
-            "--ignored=matching",
-            "--untracked-files=normal",
+            if ignored { "--ignored=matching" } else { "--ignored=no" },
+            untracked,
             "--",
             ".",
         ])
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stderr(std::process::Stdio::null())
-        .output();
-    let Ok(out) = out else { return map };
+        .output()
+        .ok()?;
     if !out.status.success() {
-        return map;
+        return None;
     }
     // Paths are relative to the repo root; find our prefix inside it.
     let top = std::process::Command::new("git")
@@ -424,6 +431,7 @@ pub fn git_status(dir: &Path) -> HashMap<String, char> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     let text = String::from_utf8_lossy(&out.stdout);
+    let mut recs = Vec::new();
     let mut it = text.split('\0');
     while let Some(rec) = it.next() {
         if rec.len() < 4 {
@@ -435,19 +443,41 @@ pub fn git_status(dir: &Path) -> HashMap<String, char> {
             it.next(); // rename source
         }
         let Some(rel) = path.strip_prefix(top.as_str()) else { continue };
+        recs.push((xy.to_string(), rel.to_string()));
+    }
+    Some(recs)
+}
+
+/// One letter for a porcelain XY code.
+fn status_letter(xy: &str) -> char {
+    match xy {
+        "!!" => '!',
+        "??" => '?',
+        _ if xy.contains('U') => 'U',
+        _ if xy.contains('A') => 'A',
+        _ if xy.contains('D') => 'D',
+        _ if xy.contains('R') => 'R',
+        _ => 'M',
+    }
+}
+
+/// Changed and untracked files under `dir` (relative paths), for the
+/// finder's Git tab. `None` when `dir` is not (safely) in a repository.
+pub fn git_changes(dir: &Path) -> Option<Vec<(char, String)>> {
+    let recs = status_records(dir, "--untracked-files=all", false)?;
+    Some(recs.into_iter().map(|(xy, p)| (status_letter(&xy), p)).collect())
+}
+
+pub fn git_status(dir: &Path) -> HashMap<String, char> {
+    let mut map = HashMap::new();
+    let Some(recs) = status_records(dir, "--untracked-files=normal", true) else { return map };
+    for (xy, rel) in recs {
+        let xy = xy.as_str();
         let child = rel.split('/').next().unwrap_or("").trim_end_matches('/');
         if child.is_empty() {
             continue;
         }
-        let c = match xy {
-            "!!" => '!',
-            "??" => '?',
-            _ if xy.contains('U') => 'U',
-            _ if xy.contains('A') => 'A',
-            _ if xy.contains('D') => 'D',
-            _ if xy.contains('R') => 'R',
-            _ => 'M',
-        };
+        let c = status_letter(xy);
         let rank = |c: char| match c {
             'U' => 6,
             'M' | 'R' | 'D' => 5,
@@ -473,6 +503,14 @@ mod tests {
         let mut v = vec!["file10", "File2", "file1", "a"];
         v.sort_by(|a, b| natural_cmp(a, b));
         assert_eq!(v, ["a", "file1", "File2", "file10"]);
+    }
+
+    #[test]
+    fn reverse_keeps_dirs_first() {
+        let e = |name: &str, kind| Entry { id: 0, path: PathBuf::from(name), name: name.into(), kind, size: 0, mtime: None, mode: 0, link_target: None, children: None };
+        let mut v = vec![e("b", Kind::File), e("z", Kind::Dir), e("a", Kind::File), e("c", Kind::Dir)];
+        sort_entries(&mut v, Sort::Name, true);
+        assert_eq!(v.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["z", "c", "b", "a"]);
     }
 
     #[test]

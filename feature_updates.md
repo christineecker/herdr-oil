@@ -4,6 +4,10 @@ This document outlines suggested enhancements for `herdr-oil` across **added fun
 
 > **Interactive UI Mockup:** Open [`docs/feature_updates_mockup.html`](docs/feature_updates_mockup.html) in a browser to review interactive Before/After TUI screens, a live `:%s` & symlink/chmod buffer sandbox, and a filterable roadmap matrix for all suggestions below.
 
+## Implementation status
+
+**Done (all 19):** editable symlinks (`name -> target`), post-apply undo (`U`, again = redo), edit listing in `$EDITOR` (`ge`), Git finder tab (`␣s`, diff previews), send paths to the origin pane (`gi`, finder `^s`, viewer `p`), `:s` / `:%s` (regex, ranges, live preview), dot repeat `.`, `,`, visual `I`/`A` + `:prefix` / `:suffix`, `:chmod` (applies immediately), ripgrep `-- *.rs -t py` filters, inline rename origins, pending-deletions footer, char-level diffs in the confirm dialog, directory stats + README previews, archive / SQLite / plist / image-metadata previews, display-width alignment, `H`/`L` history, `m{a-z}`/`'{a-z}` marks, `:` Tab completion, viewer `/` search with `n`/`N`, `gy`/`gY`/`gn`, capped child counts (`1k+ items`), `gS` / `:sort!` reverse sort.
+
 ---
 
 ## 1. Added Functionality

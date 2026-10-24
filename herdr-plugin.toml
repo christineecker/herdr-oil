@@ -58,3 +58,10 @@ title = "Oil: recent files…"
 description = "Files recently opened through herdr-oil."
 contexts = ["workspace"]
 command = ["./target/release/herdr-oil", "--launch", "recent"]
+
+[[actions]]
+id = "git"
+title = "Oil: changed files…"
+description = "Changed and untracked files (git status) with diff previews."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "git"]

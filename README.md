@@ -14,16 +14,25 @@ herdr-oil diffs the buffer against the disk, shows the plan, and applies it.
 | `dd`, go elsewhere (`-`, `⏎`), `p`       | move                    |
 | `yy`, `p`, edit the name                | copy                    |
 | `yy` or `dd`, then `gm` / `gc`          | move / copy to a fuzzy-picked folder |
+| `link -> new/target` / `o` + `name -> target` | retarget / create a symlink |
+| `:%s/IMG_(\d+)\.jpeg/photo_$1.jpg/`     | batch rename (live preview while typing) |
 
 Edits in several directories are kept and applied together. Swaps (`a`↔`b`),
 case-only renames on APFS, "move the child out, delete the parent" and
 "rename a dir while editing inside it" are handled. Nothing is ever
 overwritten; clashes are reported before anything runs.
 
-The finder (`⇥` from the explorer, or its own key) has four modes:
+The finder (`⇥` from the explorer, or its own key) has five modes:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
-matching, fzf query syntax), **Grep** (live ripgrep), and **Recent** (files you
-opened through herdr-oil). Previews use `bat` when installed.
+matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
+opened through herdr-oil), and **Git** (changed and untracked files, previewed
+as `git diff`). Previews use `bat` when installed.
+Folder previews show counts, sizes and the README; archives (`zip`, `tar.*`),
+SQLite schemas and binary plists are listed instead of "binary file".
+
+While you edit, renamed lines show where they came from (`final.md ← draft.md`),
+and a footer names what the directory will lose on `:w`; the review dialog
+highlights just the characters a rename changes.
 
 ## Install
 
@@ -50,7 +59,7 @@ type = "plugin_action"
 command = "herdr-oil.grep"
 ```
 
-Actions: `explorer`, `finder`, `grep`, `recent`. Each opens the popup at the
+Actions: `explorer`, `finder`, `grep`, `recent`, `git`. Each opens the popup at the
 focused pane's working directory.
 
 ## Opening files
@@ -85,16 +94,27 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `⏎` `-` `_` `~` | view file / enter dir · parent · start dir · home |
 | `:w` `^s` `ZZ` | review & apply · apply and quit |
 | `q` `esc` | close (asks first when edits are unsaved; esc cancels a pending key first) |
-| `u` `^r` | undo · redo (per directory) |
+| `u` `^r` `.` | undo · redo (per directory) · repeat the last change |
+| `U` `:undo-apply` | roll back the last `:w` (moves go home, Trash comes back, new entries go to Trash); `U` again redoes. Permanent deletes can't come back |
+| `ge` `:edit-buffer` | edit the listing in `$EDITOR` (`/001 name` tags keep identity, like oil.nvim); back in the explorer with the edits staged |
+| `gi` `:'<,'>send` | type the path(s) into the origin pane, no Enter (`@path` for agents, quoted for shells) |
+| `H` `L` | back · forward through visited folders |
+| `m{a-z}` `'{a-z}` `:marks` | mark the folder · jump to a mark (kept across sessions) · list marks |
+| `:%s/pat/rep/[gi]` | regex rename over a range (`%`, `'<,'>`, `n,m`, default the cursor line); `$1` or `\1` groups; the buffer previews it as you type |
+| `V…` then `I` / `A` / `:` | prefix · suffix (before the extension) · any range command on the selection |
+| `:prefix x` `:suffix x` | same on the cursor line or a range |
+| `:chmod +x` `:%chmod 644` | change permissions; applies immediately, not on `:w` |
 | `gm` `gc` | after a yank (`yy`, `V…y`): move / copy the yanked entries to a folder picked in the finder (`⏎` picks a folder, a file means its folder, `^n` uses the query as a new sub-folder); after a cut (`dd`) only `gm`. Shown in the `g` menu only while something is yanked; the review dialog follows |
-| `g.` `gs` `gd` `^p` | hidden · sort · sizes/details/off · preview |
-| `gy` | copy absolute path |
-| `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:e!` | |
-| `⇥` `␣f` `␣g` `␣d` `␣r` | finder: files · grep · dirs · recent |
+| `g.` `gs` `gS` `gd` `^p` | hidden · sort · reverse sort · sizes/details/off · preview |
+| `gy` `gY` `gn` | copy path relative to the repo (or start dir) · absolute path · file name |
+| `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:sort!` `:e!` | `⇥` completes commands and `:cd` / `:e` paths |
+| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` | finder: files · grep · dirs · recent · git changes |
 
 | viewer (`⏎` on a file) | |
 |---|---|
 | `j` `k` `␣` `b` `^d` `^u` `g` `G` | scroll |
+| `/pattern` `n` `N` | search the file, next / previous hit |
+| `p` | send the path (with `:line` of the current hit) to the origin pane |
 | `e` | edit in `$EDITOR` inside the popup, back to the viewer after |
 | `^v` `^x` `^t` `o` `y` | split right · below · tab · system app · copy path |
 | `q` `esc` | back to the listing or finder |
@@ -106,6 +126,8 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `^space` | mark several files, `⏎` opens them all |
 | `^r` | root: cwd → repository root → parent |
 | `alt-h` `alt-i` `alt-p` | hidden · ignored · preview |
+| `foo -- *.rs -t py -T md` | grep: limit to globs / ripgrep file types |
+| `^s` | send the selection (or marked files, grep hits with `:line`) to the origin pane |
 
 Vim support: counts, `h j k l w b e W B E 0 ^ $ gg G f F t T ;`, operators
 `d c y` with motions and text objects `iw aw iW aW`, plus `in`/`an` for the
@@ -123,7 +145,7 @@ stay-open, ignore rules, finder cap.
 
 ```sh
 herdr-oil [DIR|FILE]          # explore (FILE: its dir, cursor on it)
-herdr-oil --finder | --grep | --recent
+herdr-oil --finder | --grep | --recent | --git
 herdr-oil --pick              # print chosen file(s) instead of opening
 ```
 

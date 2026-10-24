@@ -522,6 +522,7 @@ dependencies = [
  "ignore",
  "nucleo",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "toml",
