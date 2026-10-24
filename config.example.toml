@@ -15,11 +15,21 @@
 # delete = "trash"
 
 # show_hidden = false
-# details = "size"       # "size" (default), "full" = perms + size + age, "off"; gd cycles
+# details = "size"       # "size" (default), "full" = perms + size + age,
+#                        # "meta" = owner + perms + xattrs (@) + broken links, "off"; gd cycles
 # preview = true         # preview pane in the explorer (toggle: ctrl-p)
 # icons = true           # needs a Nerd Font
-# git_status = true      # M/A/?/! markers per entry
+# git_status = true      # M/A/?/! markers per entry (green staged, yellow unstaged,
+#                        # peach both), branch ↑↓ badge, ]g [g, gG, gD
+# diff_layout = "auto"   # diff view: "auto" (split from 160 columns), "unified", "split"
 # confirm = true         # review dialog before applying (always on for deletes)
 # stay_open = false      # keep the popup after handing a file to a split/tab
 # respect_ignore = true  # finder honours .gitignore (toggle: alt-i)
 # max_files = 200000     # finder walk cap
+
+# Rename recipes for `:recipe NAME` (on the cursor line, a range or a
+# selection). A recipe is one range command or a list run in order, as one
+# undo step; built-ins: kebab snake slugify lower upper title clean screenshots.
+# [recipes]
+# photos = ["screenshots", "prefix {02#}-"]   # {#} counts: {02#} 01 02 …
+# underscores = "s/ /_/g"

@@ -18,6 +18,12 @@ pub struct Theme {
     pub yellow: Color,
     pub peach: Color,
     pub teal: Color,
+    /// Terminal background, for blending diff tints (`[theme.custom]
+    /// background`, default #222222).
+    pub bg: Color,
+    /// The terminal takes 24-bit colours (`$COLORTERM`); without it the diff
+    /// view drops its tinted backgrounds.
+    pub truecolor: bool,
 }
 
 fn hex(s: &str) -> Option<Color> {
@@ -31,6 +37,17 @@ fn hex(s: &str) -> Option<Color> {
         ((v >> 8) & 0xff) as u8,
         (v & 0xff) as u8,
     ))
+}
+
+/// Mix `fg` into `bg` (both RGB; anything else returns `fg`).
+pub fn blend(fg: Color, bg: Color, alpha: f32) -> Color {
+    match (fg, bg) {
+        (Color::Rgb(r, g, b), Color::Rgb(r2, g2, b2)) => {
+            let m = |a: u8, b: u8| (a as f32 * alpha + b as f32 * (1.0 - alpha)).round() as u8;
+            Color::Rgb(m(r, r2), m(g, g2), m(b, b2))
+        }
+        _ => fg,
+    }
 }
 
 impl Default for Theme {
@@ -49,6 +66,8 @@ impl Default for Theme {
             yellow: t("#fce566"),
             peach: t("#fd9353"),
             teal: t("#5ad4e6"),
+            bg: t("#222222"),
+            truecolor: std::env::var("COLORTERM").is_ok_and(|v| matches!(v.as_str(), "truecolor" | "24bit")),
         }
     }
 }
@@ -114,7 +133,18 @@ impl Theme {
         if let Some(c) = get("teal") {
             th.teal = c;
         }
+        if let Some(c) = get("background") {
+            th.bg = c;
+        }
         th
+    }
+
+    /// `c` laid over the background at `alpha` (0–1); `None` without truecolor.
+    pub fn tint(&self, c: Color, alpha: f32) -> Option<Color> {
+        if !self.truecolor {
+            return None;
+        }
+        Some(blend(c, self.bg, alpha))
     }
 
 }

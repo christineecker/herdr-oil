@@ -45,7 +45,7 @@ pub struct Config {
     pub open: OpenTarget,
     pub delete: DeleteMethod,
     pub show_hidden: bool,
-    /// 0 = off, 1 = size column, 2 = perms + size + age.
+    /// 0 = off, 1 = size column, 2 = perms + size + age, 3 = owner, xattrs, links.
     pub details: u8,
     pub preview: bool,
     pub icons: bool,
@@ -59,6 +59,10 @@ pub struct Config {
     /// Finder: cap on walked entries.
     pub max_files: usize,
     pub state_dir: PathBuf,
+    /// Diff viewer layout: auto (split from 160 columns), unified, split.
+    pub diff_layout: crate::diffview::Layout,
+    /// `[recipes]`: name → range commands (`"s/ /_/g"`, `["kebab", "prefix {02#}-"]`).
+    pub recipes: Vec<(String, Vec<String>)>,
 }
 
 impl Default for Config {
@@ -78,6 +82,8 @@ impl Default for Config {
             respect_ignore: true,
             max_files: 200_000,
             state_dir: PathBuf::from(home).join(".local/state/herdr-oil"),
+            diff_layout: crate::diffview::Layout::Auto,
+            recipes: vec![],
         }
     }
 }
@@ -135,6 +141,7 @@ impl Config {
                 self.details = match v.as_str() {
                     "off" | "none" => 0,
                     "full" | "all" => 2,
+                    "meta" | "metadata" => 3,
                     _ => 1,
                 }
             }
@@ -160,6 +167,22 @@ impl Config {
         }
         if let Some(v) = doc.get("max_files").and_then(|v| v.as_integer()) {
             self.max_files = v.max(1000) as usize;
+        }
+        if let Some(v) = s("diff_layout").as_deref().and_then(crate::diffview::Layout::parse) {
+            self.diff_layout = v;
+        }
+        if let Some(t) = doc.get("recipes").and_then(|v| v.as_table()) {
+            self.recipes = t
+                .iter()
+                .filter_map(|(k, v)| {
+                    let steps: Vec<String> = match v {
+                        toml::Value::String(s) => vec![s.clone()],
+                        toml::Value::Array(a) => a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect(),
+                        _ => return None,
+                    };
+                    (!steps.is_empty()).then(|| (k.clone(), steps))
+                })
+                .collect();
         }
     }
 
@@ -200,5 +223,8 @@ mod tests {
         assert_eq!(c.details, 2);
         c.apply(&"details = \"off\"".parse().unwrap());
         assert_eq!(c.details, 0);
+        c.apply(&"diff_layout = \"split\"\n[recipes]\nphotos = [\"kebab\", \"prefix {02#}-\"]\nunder = \"s/ /_/g\"".parse().unwrap());
+        assert_eq!(c.diff_layout, crate::diffview::Layout::Split);
+        assert_eq!(c.recipes.iter().find(|(k, _)| k == "photos").map(|(_, v)| v.len()), Some(2));
     }
 }

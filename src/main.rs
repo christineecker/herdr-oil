@@ -7,11 +7,16 @@
 //!   herdr-oil --pick             print the chosen file(s) to stdout instead of opening
 
 mod app;
+mod archive;
 mod apply;
 mod buffer;
 mod config;
+mod diff;
+mod diffview;
 mod entry;
 mod finder;
+mod git;
+mod input;
 mod launch;
 mod open;
 mod plan;

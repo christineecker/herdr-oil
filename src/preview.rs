@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+/// What a preview shows for a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    File,
+    /// The structured `git diff` (the file itself when unchanged).
+    Diff,
+    /// `git log --graph` of the path.
+    Log,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Key {
     pub path: PathBuf,
@@ -19,23 +29,29 @@ pub struct Key {
     pub width: u16,
     pub max: usize,
     pub mtime: Option<std::time::SystemTime>,
-    pub diff: bool,
+    pub show: Show,
+    pub hidden: bool,
 }
 
+type Rendered = (Key, Vec<Line<'static>>, usize);
+
+/// Previews are rendered on a worker thread (bat, git, tar, unzip can take
+/// tens of milliseconds): the draw asks for a key and keeps showing what it
+/// has until the worker answers; stale requests are skipped.
+#[derive(Default)]
 pub struct Cache {
     pub key: Option<Key>,
     pub lines: Vec<Line<'static>>,
     /// Index into `lines` to scroll to (grep hit).
     pub focus: usize,
+    /// Requested, not rendered yet.
+    pub pending: Option<Key>,
+    tx: Option<std::sync::mpsc::Sender<(Key, Theme)>>,
+    rx: Option<std::sync::mpsc::Receiver<Rendered>>,
 }
 
-impl Default for Cache {
-    fn default() -> Self {
-        Cache { key: None, lines: vec![], focus: 0 }
-    }
-}
 
-fn bat_bin() -> Option<&'static str> {
+pub fn bat_bin() -> Option<&'static str> {
     static BAT: OnceLock<Option<&'static str>> = OnceLock::new();
     *BAT.get_or_init(|| {
         for b in ["bat", "batcat"] {
@@ -59,19 +75,102 @@ pub const PREVIEW_LINES: usize = 400;
 pub const VIEWER_LINES: usize = 50_000;
 
 impl Cache {
-    /// `diff`: show `git diff HEAD` for the file when there is one (Git tab).
+    fn worker(&mut self) -> Option<&std::sync::mpsc::Sender<(Key, Theme)>> {
+        if self.tx.is_none() {
+            let (tx, req) = std::sync::mpsc::channel::<(Key, Theme)>();
+            let (done, rx) = std::sync::mpsc::channel::<Rendered>();
+            std::thread::spawn(move || {
+                while let Ok(mut job) = req.recv() {
+                    // only the newest request matters
+                    while let Ok(newer) = req.try_recv() {
+                        job = newer;
+                    }
+                    let (key, th) = job;
+                    let (lines, focus) = render_key(&key, &th);
+                    if done.send((key, lines, focus)).is_err() {
+                        break;
+                    }
+                }
+            });
+            self.tx = Some(tx);
+            self.rx = Some(rx);
+        }
+        self.tx.as_ref()
+    }
+
+    /// Ask for the preview of `path`; returns the cache with the newest
+    /// rendering available (check [`Cache::ready`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn get(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, diff: bool) -> &Cache {
+    pub fn get(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, show: Show) -> &Cache {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let key = Key { path: path.to_path_buf(), line, width, max, mtime, diff };
-        if self.key.as_ref() != Some(&key) {
-            let diffed = if diff { git_diff(path, th, max) } else { None };
-            let (lines, focus) = diffed.map(|v| (v, 0)).unwrap_or_else(|| render(path, line, width, th, hidden, max));
-            self.lines = lines;
-            self.focus = focus;
-            self.key = Some(key);
+        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden };
+        self.poll();
+        if self.key.as_ref() != Some(&key) && self.pending.as_ref() != Some(&key) {
+            let sent = self.worker().is_some_and(|tx| tx.send((key.clone(), th.clone())).is_ok());
+            if sent {
+                self.pending = Some(key);
+            } else {
+                let (lines, focus) = render_key(&key, th);
+                (self.lines, self.focus, self.key) = (lines, focus, Some(key));
+            }
         }
         self
+    }
+
+    /// Take finished renderings; true when the shown preview changed.
+    pub fn poll(&mut self) -> bool {
+        let Some(rx) = &self.rx else { return false };
+        let mut changed = false;
+        while let Ok((key, lines, focus)) = rx.try_recv() {
+            if self.pending.as_ref() == Some(&key) {
+                self.pending = None;
+            }
+            (self.lines, self.focus, self.key) = (lines, focus, Some(key));
+            changed = true;
+        }
+        changed
+    }
+
+    /// The shown lines belong to the last requested key.
+    pub fn ready(&self) -> bool {
+        self.pending.is_none() && self.key.is_some()
+    }
+
+    /// Forget the rendering (the file changed under it).
+    pub fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    /// Render synchronously.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_now(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, show: Show) -> &Cache {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden };
+        let (lines, focus) = render_key(&key, th);
+        (self.lines, self.focus, self.key, self.pending) = (lines, focus, Some(key), None);
+        self
+    }
+}
+
+fn render_key(k: &Key, th: &Theme) -> (Vec<Line<'static>>, usize) {
+    match k.show {
+        Show::Diff => git_diff(&k.path, th, k.width, k.max).map(|v| (v, 0)).unwrap_or_else(|| render(&k.path, k.line, k.width, th, k.hidden, k.max)),
+        Show::Log => (git_log(&k.path, th, k.max), 0),
+        Show::File => render(&k.path, k.line, k.width, th, k.hidden, k.max),
+    }
+}
+
+/// `git log --graph` of a path, coloured by git.
+fn git_log(path: &Path, th: &Theme, max: usize) -> Vec<Line<'static>> {
+    match crate::git::log(path, max.min(200)) {
+        Ok(v) if v.is_empty() => vec![Line::styled(" no commits touch this path yet", Style::default().fg(th.dim))],
+        Ok(v) => {
+            let mut out = vec![Line::styled(" git log", Style::default().fg(th.subtext).add_modifier(Modifier::BOLD)), Line::raw("")];
+            out.extend(v.iter().map(|l| parse_ansi(&format!(" {l}"))));
+            out
+        }
+        Err(e) => vec![Line::styled(format!(" {e}"), Style::default().fg(th.red))],
     }
 }
 
@@ -86,6 +185,9 @@ fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool
     }
     if meta.is_dir() {
         return (dir_listing(path, th, hidden, max, width), 0);
+    }
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+        return (pdf(path, th, max, meta.len()), 0);
     }
     // binary sniff
     let mut head = [0u8; 8192];
@@ -151,27 +253,52 @@ fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool
     (v, line.map(|l| l - start).unwrap_or(0))
 }
 
-/// Coloured `git diff HEAD -- file` (works for deleted files too). Same
-/// precautions as the status column: no hooks, external diffs, textconv,
-/// pager, and nothing at all when the repo defines its own filters.
-fn git_diff(path: &Path, th: &Theme, max: usize) -> Option<Vec<Line<'static>>> {
-    let dir = path.parent()?;
-    let dir = std::iter::successors(Some(dir), |d| d.parent()).find(|d| d.is_dir())?;
-    if entry::repo_defines_filters(dir) {
+/// Structured `git diff` of a file (HEAD → work tree; deleted and
+/// untracked files too), rendered compactly. `None` when it has no changes
+/// or git cannot (safely) run there.
+fn git_diff(path: &Path, th: &Theme, width: u16, max: usize) -> Option<Vec<Line<'static>>> {
+    let o = crate::diff::Opts::default();
+    let mut files = crate::diff::load(path, false, o).ok()?;
+    if files.is_empty() && path.is_file() && crate::entry::git_status(path.parent()?).get(&path.file_name()?.to_string_lossy().into_owned()).is_some_and(|g| g.letter == '?') {
+        // not tracked yet: all of it is new
+        files = crate::diff::load(path, true, o).ok()?;
+    }
+    if files.is_empty() {
         return None;
     }
-    let out = run_capped(
-        Command::new("git")
-            .args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=", "-c", "core.pager=cat", "--no-optional-locks", "--no-pager"])
-            .args(["diff", "--no-ext-diff", "--no-textconv", "--color=always", "HEAD", "--"])
-            .arg(path)
-            .current_dir(dir)
-            .env("GIT_OPTIONAL_LOCKS", "0"),
-        max,
-    )?;
-    let mut v = vec![Line::styled(" git diff HEAD", Style::default().fg(th.subtext).add_modifier(Modifier::BOLD)), Line::raw("")];
-    v.extend(out.iter().map(|l| parse_ansi(&format!(" {l}"))));
-    Some(v)
+    Some(crate::diff::render_compact(&files, th, width, max))
+}
+
+/// PDF: `pdfinfo` metadata and the first pages' text via `pdftotext`
+/// (poppler), else Spotlight's `mdls` on macOS, else just the header.
+fn pdf(path: &Path, th: &Theme, max: usize, size: u64) -> Vec<Line<'static>> {
+    let mut v = vec![Line::from(vec![
+        Span::styled(" PDF document", Style::default().fg(th.subtext).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  ·  {}", entry::human_size(size)), Style::default().fg(th.dim)),
+    ])];
+    let info = run_capped(Command::new("pdfinfo").arg(path), 30).or_else(|| {
+        cfg!(target_os = "macos")
+            .then(|| run_capped(Command::new("mdls").args(["-name", "kMDItemTitle", "-name", "kMDItemAuthors", "-name", "kMDItemNumberOfPages", "-name", "kMDItemPageWidth", "-name", "kMDItemPageHeight", "-name", "kMDItemCreator"]).arg(path), 30))
+            .flatten()
+    });
+    if let Some(info) = info {
+        v.push(Line::raw(""));
+        for l in info.into_iter().filter(|l| !l.trim_end().ends_with("(null)")) {
+            let (k, val) = l.split_once(':').or_else(|| l.split_once('=')).unwrap_or((&l, ""));
+            v.push(Line::from(vec![
+                Span::styled(format!(" {:<16}", k.trim().trim_start_matches("kMDItem")), Style::default().fg(th.dim)),
+                Span::styled(val.trim().to_string(), Style::default().fg(th.text)),
+            ]));
+        }
+    }
+    if let Some(text) = run_capped(Command::new("pdftotext").args(["-l", "3", "-layout", "-enc", "UTF-8"]).arg(path).arg("-"), max) {
+        v.push(Line::raw(""));
+        v.push(Line::styled(" text (first pages)", Style::default().fg(th.yellow).add_modifier(Modifier::BOLD)));
+        v.extend(text.into_iter().map(|l| Line::styled(format!(" {}", l.chars().filter(|c| !c.is_control()).collect::<String>()), Style::default().fg(th.subtext))));
+    } else if v.len() == 1 {
+        v.push(Line::styled(" install poppler (pdfinfo, pdftotext) for metadata and text", Style::default().fg(th.dim)));
+    }
+    v
 }
 
 fn is_image(ext: &str) -> bool {
@@ -318,6 +445,12 @@ fn ansi_color(n: u8) -> Color {
 
 /// Minimal SGR parser: colours (16/256/truecolor), bold/dim/italic/underline.
 pub fn parse_ansi(s: &str) -> Line<'static> {
+    parse_ansi_tabs(s, true)
+}
+
+/// [`parse_ansi`], optionally keeping tabs as they are (so char positions
+/// still match the source text).
+pub fn parse_ansi_tabs(s: &str, expand_tabs: bool) -> Line<'static> {
     let mut spans = Vec::new();
     let mut style = Style::default();
     let mut buf = String::new();
@@ -389,7 +522,7 @@ pub fn parse_ansi(s: &str) -> Line<'static> {
             continue;
         }
         if c == '\t' {
-            buf.push_str("    ");
+            buf.push_str(if expand_tabs { "    " } else { "\t" });
         } else if !c.is_control() {
             buf.push(c);
         }
@@ -412,5 +545,42 @@ mod tests {
         assert_eq!(l.spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
         assert_eq!(l.spans[1].style, Style::default());
         assert_eq!(l.spans[2].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn diff_before_first_commit() {
+        let t = crate::plan::tests::tmpdir("preview-unborn");
+        let git = |args: &[&str]| Command::new("git").args(args).current_dir(&t.0).output().unwrap();
+        git(&["init", "-q"]);
+        std::fs::write(t.0.join("a.txt"), "hello\n").unwrap();
+        git(&["add", "a.txt"]);
+        let v = git_diff(&t.0.join("a.txt"), &Theme::load(), 80, 100).expect("staged diff");
+        assert!(v[0].to_string().contains("a.txt"));
+        assert!(v.iter().any(|l| l.to_string().contains("+ hello")), "{v:?}");
+    }
+
+    #[test]
+    fn worker_renders_in_background() {
+        let t = crate::plan::tests::tmpdir("preview-worker");
+        std::fs::write(t.0.join("a.txt"), "hello\n").unwrap();
+        let mut c = Cache::default();
+        let th = Theme::load();
+        c.get(&t.0.join("a.txt"), None, 40, &th, false, 10, Show::File);
+        let t0 = std::time::Instant::now();
+        while !c.ready() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            c.poll();
+        }
+        assert!(c.lines.iter().any(|l| l.to_string().contains("hello")));
+        c.get_now(&t.0.join("a.txt"), None, 40, &th, false, 10, Show::File);
+        assert!(c.ready());
+    }
+
+    #[test]
+    fn pdf_without_tools_still_previews() {
+        let t = crate::plan::tests::tmpdir("preview-pdf");
+        std::fs::write(t.0.join("x.pdf"), b"%PDF-1.4\n%\xe2\xe3\n").unwrap();
+        let (v, _) = render(&t.0.join("x.pdf"), None, 60, &Theme::load(), false, 50);
+        assert!(v[0].to_string().contains("PDF"), "{v:?}");
     }
 }

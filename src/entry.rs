@@ -34,6 +34,8 @@ pub struct Entry {
     pub link_target: Option<String>,
     /// Direct children of a directory (None for files or unreadable dirs).
     pub children: Option<usize>,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 impl Entry {
@@ -140,7 +142,10 @@ pub fn stat_entry(path: &Path, name: String) -> Entry {
     let mut size = 0;
     let mut mtime = None;
     let mut mode = 0;
+    let (mut uid, mut gid) = (0, 0);
     if let Some(m) = &lmeta {
+        use std::os::unix::fs::MetadataExt;
+        (uid, gid) = (m.uid(), m.gid());
         let ft = m.file_type();
         mtime = m.modified().ok();
         mode = m.permissions().mode();
@@ -159,7 +164,7 @@ pub fn stat_entry(path: &Path, name: String) -> Entry {
     }
     // Counting runs on the UI thread: cap it so node_modules-sized folders stay instant.
     let children = if kind.is_dir() { fs::read_dir(path).ok().map(|rd| rd.take(CHILD_CAP).count()) } else { None };
-    Entry { id: 0, path: path.to_path_buf(), name, kind, size, mtime, mode, link_target, children }
+    Entry { id: 0, path: path.to_path_buf(), name, kind, size, mtime, mode, link_target, children, uid, gid }
 }
 
 fn ext_of(name: &str) -> &str {
@@ -266,6 +271,52 @@ pub fn age(t: Option<SystemTime>) -> String {
     }
 }
 
+/// User and group names for the metadata column (ids when unknown).
+pub fn owner(uid: u32, gid: u32) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static NAMES: OnceLock<Mutex<HashMap<(bool, u32), String>>> = OnceLock::new();
+    let names = NAMES.get_or_init(Default::default);
+    let lookup = |group: bool, id: u32| -> String {
+        if let Some(n) = names.lock().ok().and_then(|m| m.get(&(group, id)).cloned()) {
+            return n;
+        }
+        let mut buf = vec![0 as libc::c_char; 4096];
+        let name = unsafe {
+            if group {
+                let mut g: libc::group = std::mem::zeroed();
+                let mut out: *mut libc::group = std::ptr::null_mut();
+                (libc::getgrgid_r(id, &mut g, buf.as_mut_ptr(), buf.len(), &mut out) == 0 && !out.is_null()).then(|| std::ffi::CStr::from_ptr(g.gr_name).to_string_lossy().into_owned())
+            } else {
+                let mut p: libc::passwd = std::mem::zeroed();
+                let mut out: *mut libc::passwd = std::ptr::null_mut();
+                (libc::getpwuid_r(id, &mut p, buf.as_mut_ptr(), buf.len(), &mut out) == 0 && !out.is_null()).then(|| std::ffi::CStr::from_ptr(p.pw_name).to_string_lossy().into_owned())
+            }
+        }
+        .unwrap_or_else(|| id.to_string());
+        if let Ok(mut m) = names.lock() {
+            m.insert((group, id), name.clone());
+        }
+        name
+    };
+    format!("{}:{}", lookup(false, uid), lookup(true, gid))
+}
+
+/// The entry carries extended attributes (not following symlinks).
+pub fn has_xattrs(p: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+    #[cfg(target_os = "macos")]
+    let n = unsafe { libc::listxattr(c.as_ptr(), std::ptr::null_mut(), 0, libc::XATTR_NOFOLLOW) };
+    #[cfg(not(target_os = "macos"))]
+    let n = unsafe { libc::llistxattr(c.as_ptr(), std::ptr::null_mut(), 0) };
+    n > 0
+}
+
+/// A symlink whose target is missing.
+pub fn broken_link(e: &Entry) -> bool {
+    e.kind == Kind::Link && fs::metadata(&e.path).is_err()
+}
+
 pub fn perms(mode: u32, kind: Kind) -> String {
     let mut s = String::with_capacity(10);
     s.push(match kind {
@@ -357,14 +408,169 @@ pub enum IconColor {
     Red,
 }
 
-/// One-letter git status per direct child of `dir` (dirs aggregate their
-/// contents). Empty map when not in a repo or git is unavailable.
+/// Git status of an entry: the one-letter summary plus whether the change
+/// sits in the index (staged), in the work tree (unstaged), or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Git {
+    pub letter: char,
+    pub staged: bool,
+    pub unstaged: bool,
+}
+
+impl Git {
+    pub fn from_xy(xy: &str) -> Git {
+        let mut c = xy.chars();
+        let (x, y) = (c.next().unwrap_or(' '), c.next().unwrap_or(' '));
+        let real = |c: char| !matches!(c, ' ' | '?' | '!');
+        let conflict = xy.contains('U') || xy == "AA" || xy == "DD";
+        Git { letter: status_letter(xy), staged: real(x) && !conflict, unstaged: real(y) && !conflict }
+    }
+
+    fn rank(self) -> u8 {
+        match self.letter {
+            'U' => 6,
+            'M' | 'R' | 'D' => 5,
+            'A' => 4,
+            '?' => 3,
+            '!' => 1,
+            _ => 0,
+        }
+    }
+
+    /// Fold a child's status into a directory's: the strongest letter wins,
+    /// staged / unstaged accumulate.
+    pub fn merge(&mut self, o: Git) {
+        if o.rank() > self.rank() {
+            self.letter = o.letter;
+        }
+        self.staged |= o.staged;
+        self.unstaged |= o.unstaged;
+    }
+
+    /// Both staged and unstaged changes (`MM`, `AM`, or a folder holding both).
+    pub fn partial(self) -> bool {
+        self.staged && self.unstaged
+    }
+}
+
+/// Branch line of `git status -b`: `main...origin/main [ahead 1, behind 2]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Branch {
+    pub name: String,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub detached: bool,
+    /// No commits yet.
+    pub unborn: bool,
+}
+
+impl Branch {
+    /// Parse the text after `## `.
+    pub fn parse(h: &str) -> Branch {
+        let mut b = Branch::default();
+        let h = h.trim();
+        if let Some(n) = h.strip_prefix("No commits yet on ").or_else(|| h.strip_prefix("Initial commit on ")) {
+            b.name = n.trim().to_string();
+            b.unborn = true;
+            return b;
+        }
+        if h.starts_with("HEAD (no branch)") {
+            b.name = "HEAD".into();
+            b.detached = true;
+            return b;
+        }
+        let (head, track) = match h.split_once(" [") {
+            Some((a, t)) => (a, Some(t.trim_end_matches(']'))),
+            None => (h, None),
+        };
+        match head.split_once("...") {
+            Some((n, u)) => {
+                b.name = n.to_string();
+                b.upstream = Some(u.to_string());
+            }
+            None => b.name = head.to_string(),
+        }
+        for part in track.into_iter().flat_map(|t| t.split(", ")) {
+            if let Some(n) = part.strip_prefix("ahead ") {
+                b.ahead = n.parse().unwrap_or(0);
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                b.behind = n.parse().unwrap_or(0);
+            }
+        }
+        b
+    }
+
+    /// Compact badge: ` main ↑1↓2`.
+    pub fn badge(&self) -> String {
+        let mut s = self.name.clone();
+        if self.unborn {
+            s.push_str(" (no commits)");
+        }
+        if self.ahead > 0 {
+            s.push_str(&format!(" ↑{}", self.ahead));
+        }
+        if self.behind > 0 {
+            s.push_str(&format!(" ↓{}", self.behind));
+        }
+        s
+    }
+}
+
+/// The work tree containing `dir`: the nearest ancestor with a `.git`
+/// directory or file (worktrees, submodules), found without running git.
+pub fn work_tree(dir: &Path) -> Option<PathBuf> {
+    let dir = fs::canonicalize(dir).ok()?;
+    dir.ancestors().find(|d| fs::symlink_metadata(d.join(".git")).is_ok()).map(Path::to_path_buf)
+}
+
+/// How long a "no filters here" verdict is trusted without re-checking
+/// (config can include other files whose changes we cannot see).
+const FILTER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Modification times of the repository's own config files: a change there
+/// invalidates the cached filter verdict at once.
+fn config_stamp(root: &Path) -> Vec<Option<SystemTime>> {
+    let git = root.join(".git");
+    let gitdir = if git.is_dir() { git } else { root.to_path_buf() };
+    ["config", "config.worktree"].iter().map(|f| fs::metadata(gitdir.join(f)).and_then(|m| m.modified()).ok()).collect()
+}
+
+type FilterCache = HashMap<PathBuf, (std::time::Instant, Vec<Option<SystemTime>>, bool)>;
+
+fn filter_cache() -> &'static std::sync::Mutex<FilterCache> {
+    static C: std::sync::OnceLock<std::sync::Mutex<FilterCache>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 /// True when any config git would read for `dir` defines a clean/smudge/
 /// process filter outside the user's own global/system files. `git status`
 /// may run clean filters, so a repository that carries its own config (an
 /// unpacked archive, a shared folder; local, worktree or included files)
 /// could make us execute arbitrary commands. Reading config never runs filters.
+///
+/// The verdict is cached per work tree (keyed by its config files' mtimes,
+/// and for [`FILTER_TTL`] at most) so walking around a repository costs no
+/// extra `git config` call per directory.
 pub fn repo_defines_filters(dir: &Path) -> bool {
+    let root = work_tree(dir);
+    if let Some(r) = &root {
+        let stamp = config_stamp(r);
+        if let Some((t, st, v)) = filter_cache().lock().ok().and_then(|c| c.get(r).cloned()) {
+            if st == stamp && t.elapsed() < FILTER_TTL {
+                return v;
+            }
+        }
+        let v = filters_uncached(dir);
+        if let Ok(mut c) = filter_cache().lock() {
+            c.insert(r.clone(), (std::time::Instant::now(), stamp, v));
+        }
+        return v;
+    }
+    filters_uncached(dir)
+}
+
+fn filters_uncached(dir: &Path) -> bool {
     let out = std::process::Command::new("git")
         .args(["config", "--list", "--show-scope", "--includes", "--name-only"])
         .current_dir(dir)
@@ -383,10 +589,25 @@ pub fn repo_defines_filters(dir: &Path) -> bool {
     })
 }
 
-/// `git status --porcelain=v1 -z` records for `dir` (paths relative to it),
-/// run with every hook/filter/external-diff knob off. `None` outside a repo
-/// or when the repository carries its own filters.
-fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Vec<(String, String)>> {
+/// A `git status` record: porcelain `XY`, path relative to the listed
+/// directory, and the source of a rename / copy.
+pub struct Record {
+    pub xy: String,
+    pub path: String,
+    pub orig: Option<String>,
+}
+
+pub struct Status {
+    pub records: Vec<Record>,
+    pub branch: Option<Branch>,
+}
+
+/// `git status --porcelain=v1 -b -z` for `dir` (paths relative to it), run
+/// with every hook/filter/external-diff knob off. `None` outside a repo or
+/// when the repository carries its own filters. One subprocess: the work
+/// tree is found in Rust and the filter check is cached.
+fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Status> {
+    let root = work_tree(dir)?;
     if repo_defines_filters(dir) {
         return None;
     }
@@ -402,11 +623,13 @@ fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Vec<(Str
             "diff.external=",
             "-c",
             "status.submoduleSummary=false",
+            "-c",
+            "status.renames=true",
             "--no-optional-locks",
             "status",
             "--ignore-submodules=all",
-            "--no-renames",
             "--porcelain=v1",
+            "-b",
             "-z",
             if ignored { "--ignored=matching" } else { "--ignored=no" },
             untracked,
@@ -421,31 +644,37 @@ fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Vec<(Str
     if !out.status.success() {
         return None;
     }
-    // Paths are relative to the repo root; find our prefix inside it.
-    let top = std::process::Command::new("git")
-        .args(["rev-parse", "--show-prefix"])
-        .current_dir(dir)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    // Paths are relative to the repo root; our prefix inside it, in Rust
+    // (both sides canonical, or /tmp vs /private/tmp would drop everything).
+    let canon = fs::canonicalize(dir).ok()?;
+    let top = match canon.strip_prefix(&root) {
+        Ok(p) if p.as_os_str().is_empty() => String::new(),
+        Ok(p) => format!("{}/", p.to_string_lossy()),
+        Err(_) => return None,
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut recs = Vec::new();
+    let mut branch = None;
     let mut it = text.split('\0');
     while let Some(rec) = it.next() {
+        if let Some(h) = rec.strip_prefix("## ") {
+            branch = Some(Branch::parse(h));
+            continue;
+        }
         if rec.len() < 4 {
             continue;
         }
         let (xy, path) = rec.split_at(3);
         let xy = &xy[..2];
-        if xy.starts_with('R') || xy.starts_with('C') {
-            it.next(); // rename source
-        }
-        let Some(rel) = path.strip_prefix(top.as_str()) else { continue };
-        recs.push((xy.to_string(), rel.to_string()));
+        let orig = if xy.starts_with('R') || xy.starts_with('C') { it.next() } else { None };
+        let orig = orig.and_then(|o| o.strip_prefix(top.as_str())).map(str::to_string);
+        let Some(rel) = path.strip_prefix(top.as_str()) else {
+            // moved here from outside this folder: the source is elsewhere
+            continue;
+        };
+        recs.push(Record { xy: xy.to_string(), path: rel.to_string(), orig });
     }
-    Some(recs)
+    Some(Status { records: recs, branch })
 }
 
 /// One letter for a porcelain XY code.
@@ -453,45 +682,45 @@ fn status_letter(xy: &str) -> char {
     match xy {
         "!!" => '!',
         "??" => '?',
-        _ if xy.contains('U') => 'U',
+        _ if xy.contains('U') || xy == "AA" || xy == "DD" => 'U',
+        _ if xy.contains('R') => 'R',
         _ if xy.contains('A') => 'A',
         _ if xy.contains('D') => 'D',
-        _ if xy.contains('R') => 'R',
         _ => 'M',
     }
 }
 
 /// Changed and untracked files under `dir` (relative paths), for the
 /// finder's Git tab. `None` when `dir` is not (safely) in a repository.
-pub fn git_changes(dir: &Path) -> Option<Vec<(char, String)>> {
-    let recs = status_records(dir, "--untracked-files=all", false)?;
-    Some(recs.into_iter().map(|(xy, p)| (status_letter(&xy), p)).collect())
+pub fn git_changes(dir: &Path) -> Option<Vec<(Git, String)>> {
+    let st = status_records(dir, "--untracked-files=all", false)?;
+    Some(st.records.into_iter().map(|r| (Git::from_xy(&r.xy), r.path)).collect())
 }
 
-pub fn git_status(dir: &Path) -> HashMap<String, char> {
-    let mut map = HashMap::new();
-    let Some(recs) = status_records(dir, "--untracked-files=normal", true) else { return map };
-    for (xy, rel) in recs {
-        let xy = xy.as_str();
-        let child = rel.split('/').next().unwrap_or("").trim_end_matches('/');
-        if child.is_empty() {
-            continue;
-        }
-        let c = status_letter(xy);
-        let rank = |c: char| match c {
-            'U' => 6,
-            'M' | 'R' | 'D' => 5,
-            'A' => 4,
-            '?' => 3,
-            '!' => 1,
-            _ => 0,
-        };
-        let slot = map.entry(child.to_string()).or_insert(c);
-        if rank(c) > rank(*slot) {
-            *slot = c;
+/// Git status per direct child of `dir` (folders aggregate their contents;
+/// the folder a file was renamed out of counts as changed too), plus the
+/// branch. Empty outside a repository or when git is unavailable.
+pub fn git_status_full(dir: &Path) -> (HashMap<String, Git>, Option<Branch>) {
+    let mut map: HashMap<String, Git> = HashMap::new();
+    let Some(st) = status_records(dir, "--untracked-files=normal", true) else { return (map, None) };
+    for r in st.records {
+        let g = Git::from_xy(&r.xy);
+        let paths = std::iter::once(r.path.as_str()).chain(r.orig.as_deref());
+        for (k, p) in paths.enumerate() {
+            let mut parts = p.split('/');
+            let child = parts.next().unwrap_or("").trim_end_matches('/');
+            // the source of a rename only marks a folder it left
+            if child.is_empty() || (k == 1 && !parts.next().is_some_and(|s| !s.is_empty())) {
+                continue;
+            }
+            map.entry(child.to_string()).and_modify(|s| s.merge(g)).or_insert(g);
         }
     }
-    map
+    (map, st.branch)
+}
+
+pub fn git_status(dir: &Path) -> HashMap<String, Git> {
+    git_status_full(dir).0
 }
 
 #[cfg(test)]
@@ -507,7 +736,7 @@ mod tests {
 
     #[test]
     fn reverse_keeps_dirs_first() {
-        let e = |name: &str, kind| Entry { id: 0, path: PathBuf::from(name), name: name.into(), kind, size: 0, mtime: None, mode: 0, link_target: None, children: None };
+        let e = |name: &str, kind| Entry { id: 0, path: PathBuf::from(name), name: name.into(), kind, size: 0, mtime: None, mode: 0, link_target: None, children: None, uid: 0, gid: 0 };
         let mut v = vec![e("b", Kind::File), e("z", Kind::Dir), e("a", Kind::File), e("c", Kind::Dir)];
         sort_entries(&mut v, Sort::Name, true);
         assert_eq!(v.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["z", "c", "b", "a"]);
@@ -528,7 +757,7 @@ mod tests {
         let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&t).output().unwrap();
         git(&["init", "-q"]);
         fs::write(t.join("a.txt"), "x").unwrap();
-        assert_eq!(git_status(&t).get("a.txt"), Some(&'?'));
+        assert_eq!(git_status(&t).get("a.txt").map(|g| g.letter), Some('?'));
         let marker = t.join("pwned");
         git(&["config", "filter.evil.clean", &format!("touch {}", marker.display())]);
         fs::write(t.join(".gitattributes"), "* filter=evil\n").unwrap();
@@ -536,12 +765,69 @@ mod tests {
         assert!(!marker.exists());
         // worktree-scoped config is just as untrusted
         git(&["config", "--unset", "filter.evil.clean"]);
-        assert_eq!(git_status(&t).get("a.txt"), Some(&'?'));
+        assert_eq!(git_status(&t).get("a.txt").map(|g| g.letter), Some('?'));
         git(&["config", "extensions.worktreeConfig", "true"]);
         git(&["config", "--worktree", "filter.evil.process", &format!("touch {}", marker.display())]);
         assert!(git_status(&t).is_empty());
         assert!(!marker.exists());
         let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn staged_unstaged_and_renames() {
+        let t = crate::plan::tests::tmpdir("git-xy");
+        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&t.0).output().unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        fs::create_dir(t.0.join("sub")).unwrap();
+        fs::write(t.0.join("a.txt"), "a\n").unwrap();
+        fs::write(t.0.join("b.txt"), "b\n").unwrap();
+        fs::write(t.0.join("sub/c.txt"), "c\n").unwrap();
+        fs::write(t.0.join("sub/d.txt"), "d\n").unwrap();
+        let (_, br) = git_status_full(&t.0);
+        assert!(br.as_ref().is_some_and(|b| b.unborn && b.name == "main"), "{br:?}");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "x"]);
+        fs::write(t.0.join("a.txt"), "a2\n").unwrap();
+        git(&["add", "a.txt"]);
+        fs::write(t.0.join("a.txt"), "a3\n").unwrap();
+        fs::write(t.0.join("b.txt"), "b2\n").unwrap();
+        git(&["mv", "sub/c.txt", "c.txt"]);
+        let (m, br) = git_status_full(&t.0);
+        assert_eq!(br.map(|b| b.badge()), Some("main".to_string()));
+        let a = m["a.txt"];
+        assert!(a.partial() && a.letter == 'M');
+        let b = m["b.txt"];
+        assert!(!b.staged && b.unstaged);
+        assert_eq!(m["c.txt"].letter, 'R');
+        assert!(m["c.txt"].staged);
+        assert!(m.get("sub").is_some_and(|g| g.letter == 'R'), "folder a file was moved out of");
+        let sub = git_status(&t.0.join("sub"));
+        // seen from sub/ alone, the moved-away file reads as deleted
+        assert!(!sub.contains_key("d.txt") && sub.get("c.txt").is_some_and(|g| g.letter == 'D'), "{sub:?}");
+    }
+
+    #[test]
+    fn branch_headers() {
+        let b = Branch::parse("main...origin/main [ahead 2, behind 1]");
+        assert_eq!((b.name.as_str(), b.upstream.as_deref(), b.ahead, b.behind), ("main", Some("origin/main"), 2, 1));
+        assert_eq!(b.badge(), "main ↑2 ↓1");
+        assert!(Branch::parse("HEAD (no branch)").detached);
+        assert_eq!(Branch::parse("feature").upstream, None);
+        assert!(Branch::parse("No commits yet on dev").unborn);
+    }
+
+    #[test]
+    fn metadata_helpers() {
+        let t = crate::plan::tests::tmpdir("meta");
+        std::os::unix::fs::symlink(t.0.join("missing"), t.0.join("dead")).unwrap();
+        let e = stat_entry(&t.0.join("dead"), "dead".into());
+        assert!(broken_link(&e));
+        let me = stat_entry(&t.0, "t".into());
+        assert!(owner(me.uid, me.gid).contains(':'));
+        let _ = has_xattrs(&t.0.join("dead"));
+        assert!(!has_xattrs(&t.0.join("not-there")));
     }
 
     #[test]

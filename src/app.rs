@@ -3,6 +3,7 @@
 //! to the editor.
 
 use crate::apply;
+use crate::archive::{create_archive, extract_archive};
 use crate::buffer::Buffer;
 use crate::config::{Config, OpenTarget};
 use crate::entry::{Kind, Sort, Store};
@@ -15,7 +16,7 @@ use crate::vim::{Action, FinderKind, Mode, PathKind, Reg, Vim};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -42,13 +43,36 @@ pub struct Viewer {
     pub back: View,
     pub height: usize,
     pub total: usize,
-    /// `/` prompt being typed.
-    pub typing: Option<String>,
+    /// `/` prompt being typed, with its cursor.
+    pub typing: Option<(String, usize)>,
     /// Last search and the (cache) line indices that match it.
     pub search: String,
     pub hits: Vec<usize>,
     /// Line of the current hit.
     pub at: Option<usize>,
+    /// Show the structured diff instead of the file (`d` toggles).
+    pub diff: bool,
+    /// The diff view's state, kept while toggling back to the file.
+    pub dv: Option<crate::diffview::DiffView>,
+    /// `L`: show `git log` of the path instead.
+    pub log: bool,
+}
+
+/// One applied `:w` batch, for `:history`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Batch {
+    /// Seconds since the epoch.
+    pub when: u64,
+    pub lines: Vec<String>,
+    /// Ops that roll it back (empty: nothing can be undone).
+    pub undo: Vec<plan::Op>,
+    pub permanent: usize,
+}
+
+/// A confirmed action waiting for `y` in [`Overlay::Ask`].
+pub enum Deferred {
+    /// Discard unstaged changes to these files.
+    Restore(Vec<PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,7 +86,14 @@ pub enum MsgKind {
 pub enum Overlay {
     None,
     /// `undo`: the plan rolls back the last apply (deletes always go to Trash).
-    Confirm { plan: Plan, scroll: usize, then_quit: bool, undo: bool },
+    /// `sel`: the op under the cursor (`x` drops it, `o` jumps to it).
+    Confirm { plan: Plan, scroll: usize, then_quit: bool, undo: bool, sel: usize },
+    /// Yes / no before something that cannot be taken back.
+    Ask { title: String, lines: Vec<String>, then: Deferred },
+    /// `:history`: applied batches, newest first.
+    History { sel: usize },
+    /// `:w` refused because names clash: `c` numbers them, `o` jumps there.
+    Conflicts { lines: Vec<String>, scroll: usize },
     /// `query` filters the rows (`/` starts typing it).
     Help { scroll: usize, query: String, typing: bool },
     QuitPrompt,
@@ -111,6 +142,37 @@ pub struct App {
     hist_nav: bool,
     /// Directory bookmarks (`m{a-z}` / `'{a-z}`), persisted in the state dir.
     pub marks: BTreeMap<char, PathBuf>,
+    /// Diff files marked viewed (`v`), by path and change fingerprint.
+    pub viewed: HashSet<(PathBuf, u64)>,
+    /// `gw`: parent-folder column in wide popups.
+    pub show_parent: bool,
+    /// Parent listing for that column: folder, then (name, is_dir).
+    pub parent_cache: Option<(PathBuf, Vec<(String, bool)>)>,
+    /// Clickable path segments in the explorer header: x range → folder.
+    pub crumbs: Vec<(u16, u16, PathBuf)>,
+    pub head_y: u16,
+    /// `gG`: list only entries with a git status.
+    pub git_only: bool,
+    /// Background `git status` for listings (see `request_git`).
+    git_tx: Option<std::sync::mpsc::Sender<PathBuf>>,
+    git_rx: Option<std::sync::mpsc::Receiver<GitResult>>,
+    git_pending: HashSet<PathBuf>,
+    /// Applied batches, newest last (persisted, for `:history`).
+    pub journal: Vec<Batch>,
+    /// The pending plan, keyed by a hash of the edited buffers.
+    plan_cache: Option<(u64, std::rc::Rc<Plan>)>,
+    /// Viewer gutter: changed lines of the shown file (path, mtime → line → kind).
+    pub gutter: Option<(PathBuf, Option<std::time::SystemTime>, HashMap<usize, char>)>,
+}
+
+type GitResult = (PathBuf, HashMap<String, crate::entry::Git>, Option<crate::entry::Branch>);
+
+fn journal_file(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("journal.json")
+}
+
+fn load_journal(cfg: &Config) -> Vec<Batch> {
+    std::fs::read_to_string(journal_file(cfg)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
 fn marks_file(cfg: &Config) -> PathBuf {
@@ -277,8 +339,22 @@ impl App {
             fwd: vec![],
             hist_nav: false,
             marks: load_marks(&cfg),
+            viewed: HashSet::new(),
+            show_parent: false,
+            parent_cache: None,
+            crumbs: vec![],
+            head_y: 0,
+            git_only: false,
+            git_tx: None,
+            git_rx: None,
+            git_pending: HashSet::new(),
+            journal: load_journal(&cfg),
+            plan_cache: None,
+            gutter: None,
             cfg,
         };
+        app.vim.load_history(app.cfg.state_dir.join("history.txt"));
+        app.vim.recipes = app.cfg.recipes.clone();
         app.goto(&dir, focus.as_deref());
         match mode {
             "finder" | "files" => {
@@ -322,15 +398,21 @@ impl App {
 
     pub fn goto(&mut self, dir: &Path, focus: Option<&str>) {
         let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let (hidden, sort, git) = (self.hidden, self.sort, self.cfg.git_status);
+        let (hidden, sort) = (self.hidden, self.sort);
+        self.plan_cache = None;
         match self.buffers.get_mut(&dir) {
             Some(b) if b.modified() => {}
-            Some(b) => b.reload(&mut self.store, hidden, sort, git),
+            Some(b) => b.reload(&mut self.store, hidden, sort, false),
             None => {
-                let b = Buffer::load(&dir, &mut self.store, hidden, sort, git);
+                let mut b = Buffer::load(&dir, &mut self.store, hidden, sort, false);
+                if self.git_only && self.cfg.git_status {
+                    b.only_changed = true;
+                    b.reload(&mut self.store, hidden, sort, false);
+                }
                 self.buffers.insert(dir.clone(), b);
             }
         }
+        self.request_git(&dir);
         // Drop unmodified buffers of other dirs to keep things fresh.
         let cwd = dir.clone();
         self.buffers.retain(|d, b| *d == cwd || b.modified());
@@ -376,7 +458,11 @@ impl App {
     fn save(&mut self, then_quit: bool) {
         let plan = plan::build(self.buffers.values(), &self.store);
         if !plan.errors.is_empty() {
-            self.overlay = Overlay::Report { title: "Cannot save".into(), lines: plan.errors, error: true, scroll: 0 };
+            self.overlay = if plan.conflicts.is_empty() {
+                Overlay::Report { title: "Cannot save".into(), lines: plan.errors, error: true, scroll: 0 }
+            } else {
+                Overlay::Conflicts { lines: plan.errors, scroll: 0 }
+            };
             return;
         }
         if plan.ops.is_empty() {
@@ -387,7 +473,7 @@ impl App {
             return;
         }
         if self.cfg.confirm || plan.deletes() > 0 {
-            self.overlay = Overlay::Confirm { plan, scroll: 0, then_quit, undo: false };
+            self.overlay = Overlay::Confirm { plan, scroll: 0, then_quit, undo: false, sel: 0 };
         } else {
             self.execute(plan, then_quit, false);
         }
@@ -400,6 +486,7 @@ impl App {
         // batch has nothing to undo (permanent deletes only)
         if rep.done > 0 {
             self.last_batch = (!rep.undo.is_empty()).then(|| rep.undo.clone());
+            self.record(&plan, &rep);
         }
         let focus = rep.landed.iter().find(|p| p.parent() == Some(self.cwd.as_path())).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let focus = focus.or_else(|| self.buf().cur().name(&self.store).split('/').next().map(str::to_string));
@@ -443,10 +530,18 @@ impl App {
         }
         finder::push_recent(&self.cfg.state_dir, &files);
         if how == OpenTarget::View {
-            let back = if self.view == View::Viewer { View::Explorer } else { self.view };
-            let search = self.viewer.as_ref().map(|v| v.search.clone()).unwrap_or_default();
-            self.viewer = Some(Viewer { path: files[0].clone(), line, top: None, back, height: 20, total: 0, typing: None, search, hits: vec![], at: None });
-            self.view = View::Viewer;
+            // from the Git tab, or a deleted file: its diff is all there is to show
+            let git_tab = self.view == View::Finder && self.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Git);
+            let gone = std::fs::symlink_metadata(&files[0]).is_err();
+            if git_tab || gone {
+                if let Ok((root, items)) = crate::diffview::items_under(&files[0]) {
+                    if !items.is_empty() {
+                        self.open_diff(root, items, 0);
+                        return;
+                    }
+                }
+            }
+            self.open_viewer(files[0].clone(), line, false);
             return;
         }
         match open::open(&files, line, how, &self.cfg, self.origin.as_deref()) {
@@ -539,9 +634,9 @@ impl App {
                 }
             }
         }
-        let (h, s, g) = (self.hidden, self.sort, self.cfg.git_status);
+        let (h, s) = (self.hidden, self.sort);
         let store = &mut self.store;
-        let d = self.buffers.entry(dest.clone()).or_insert_with(|| crate::buffer::Buffer::load(&dest, store, h, s, g));
+        let d = self.buffers.entry(dest.clone()).or_insert_with(|| crate::buffer::Buffer::load(&dest, store, h, s, false));
         d.snapshot();
         d.lines.retain(|l| l.significant());
         for mut l in t.lines {
@@ -551,6 +646,7 @@ impl App {
             d.lines.push(l);
         }
         d.ensure_nonempty();
+        self.request_git(&dest);
         if !t.copy {
             // the entries moved; don't let a later p duplicate them
             self.vim.reg = None;
@@ -564,9 +660,30 @@ impl App {
         self.save(false);
     }
 
+    /// Pending edits for the dashboard: (`+ ~ → ⧉ −`, path).
+    fn pending_tags(&mut self) -> Vec<(char, PathBuf)> {
+        let Some(p) = self.pending_plan() else { return vec![] };
+        p.ops
+            .iter()
+            .map(|op| match op {
+                plan::Op::Create { dst, .. } | plan::Op::Link { dst, .. } => ('+', dst.clone()),
+                plan::Op::Move { src, dst, .. } if src.parent() == dst.parent() => ('~', dst.clone()),
+                plan::Op::Move { dst, .. } => ('→', dst.clone()),
+                plan::Op::Copy { dst, .. } => ('⧉', dst.clone()),
+                plan::Op::Delete { src, .. } => ('−', src.clone()),
+                plan::Op::Retarget { path, .. } => ('~', path.clone()),
+            })
+            .collect()
+    }
+
     fn open_finder(&mut self, k: FinderKind) {
+        if k == FinderKind::Dash {
+            let pending = self.pending_tags();
+            let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, self.cwd.clone(), &self.cfg));
+            f.pending = pending;
+        }
         match &mut self.finder {
-            Some(f) if f.root == self.cwd => f.set_kind(k),
+            Some(f) if f.root == self.cwd || f.pre_git.as_ref() == Some(&self.cwd) => f.set_kind(k),
             _ => self.finder = Some(Finder::new(k, self.cwd.clone(), &self.cfg)),
         }
         self.view = View::Finder;
@@ -675,8 +792,8 @@ impl App {
                 self.send_paths(paths);
             }
             Action::ToggleDetails => {
-                self.details = (self.details + 1) % 3;
-                self.flash(["details off", "sizes", "perms · size · age"][self.details as usize], MsgKind::Info);
+                self.details = (self.details + 1) % 4;
+                self.flash(["details off", "sizes", "perms · size · age", "owner · perms · xattrs (@) · broken links"][self.details as usize], MsgKind::Info);
             }
             Action::Help => self.overlay = Overlay::Help { scroll: 0, query: String::new(), typing: false },
             Action::Save => self.save(false),
@@ -687,26 +804,51 @@ impl App {
                 if self.buf().modified() {
                     self.flash("buffer has edits — :e! discards them", MsgKind::Warn);
                 } else {
-                    let (h, s, g) = (self.hidden, self.sort, self.cfg.git_status);
-                    let store = &mut self.store;
-                    if let Some(b) = self.buffers.get_mut(&self.cwd) {
-                        b.reload(store, h, s, g);
-                    }
+                    self.reload_cwd();
                     self.flash("refreshed", MsgKind::Info);
                 }
             }
             Action::Discard => {
-                let (h, s, g) = (self.hidden, self.sort, self.cfg.git_status);
-                let store = &mut self.store;
-                if let Some(b) = self.buffers.get_mut(&self.cwd) {
-                    b.reload(store, h, s, g);
-                }
+                self.reload_cwd();
                 self.flash("edits in this directory discarded", MsgKind::Info);
+            }
+            Action::Git { op, ids } => self.git_op(&op, &ids),
+            Action::Extract(ids) => self.extract(&ids),
+            Action::Archive { name, tar, ids } => self.archive(&name, tar, &ids),
+            Action::DiffView => {
+                let p = self.buf().cur_source_entry(&self.store).map(|e| e.path.clone()).unwrap_or_else(|| self.cwd.clone());
+                self.open_diff_for(&p);
+            }
+            Action::Log => {
+                let p = self.buf().cur_source_entry(&self.store).map(|e| e.path.clone()).unwrap_or_else(|| self.cwd.clone());
+                self.open_viewer(p, None, false);
+                if let Some(v) = self.viewer.as_mut() {
+                    v.log = true;
+                }
+            }
+            Action::GitFilter => {
+                if !self.cfg.git_status {
+                    self.flash("git status is off in the config", MsgKind::Warn);
+                } else if self.buf().modified() {
+                    self.flash("save (:w) or discard (:e!) edits before filtering", MsgKind::Warn);
+                } else {
+                    self.git_only = !self.git_only;
+                    let on = self.git_only;
+                    if let Some(b) = self.buffers.get_mut(&self.cwd) {
+                        b.only_changed = on;
+                    }
+                    self.reload_cwd();
+                    self.flash(if on { "only changed entries — gG shows all" } else { "showing all entries" }, MsgKind::Info);
+                }
+            }
+            Action::ToggleParent => {
+                self.show_parent = !self.show_parent;
+                self.flash(if self.show_parent { "parent column (wide popups)" } else { "parent column off" }, MsgKind::Info);
             }
             Action::Finder(k) => self.open_finder(k),
             Action::Transfer { copy } => self.start_transfer(copy),
             Action::YankPath(kind) => {
-                let p = match self.buf().cur_entry(&self.store) {
+                let p = match self.buf().cur_source_entry(&self.store) {
                     Some(e) => e.path.clone(),
                     None => self.cwd.clone(),
                 };
@@ -766,6 +908,40 @@ impl App {
                 let s = finder::tilde(&self.cwd);
                 self.flash(s, MsgKind::Info);
             }
+            "history" => {
+                if self.journal.is_empty() {
+                    self.flash("nothing applied yet", MsgKind::Info);
+                } else {
+                    self.overlay = Overlay::History { sel: 0 };
+                }
+            }
+            "plan-copy" | "plan" => {
+                let Some(p) = self.pending_plan() else {
+                    self.flash("no pending changes", MsgKind::Info);
+                    return;
+                };
+                let mut text = plan::describe(&p.ops);
+                text.extend(p.errors.iter().map(|e| format!("problem  {e}")));
+                let body = text.join("\n") + "\n";
+                match rest.strip_prefix('>').map(str::trim) {
+                    Some(f) if !f.is_empty() => {
+                        let dst = if let Some(r) = f.strip_prefix('~') { PathBuf::from(format!("{}{r}", std::env::var("HOME").unwrap_or_default())) } else { plan::normalize(&self.cwd.join(f)) };
+                        if std::fs::symlink_metadata(&dst).is_ok() {
+                            self.flash(format!("{} exists — not overwritten", finder::tilde(&dst)), MsgKind::Err);
+                        } else {
+                            match std::fs::write(&dst, body) {
+                                Ok(()) => self.flash(format!("plan written to {}", finder::tilde(&dst)), MsgKind::Ok),
+                                Err(e) => self.flash(format!("{}: {e}", finder::tilde(&dst)), MsgKind::Err),
+                            }
+                        }
+                    }
+                    _ if head == "plan" && !rest.is_empty() => self.flash("usage: :plan > file   or   :plan-copy", MsgKind::Warn),
+                    _ => match open::clipboard(&body) {
+                        Ok(()) => self.flash(format!("copied the plan ({} op{})", p.ops.len(), if p.ops.len() == 1 { "" } else { "s" }), MsgKind::Ok),
+                        Err(e) => self.flash(e, MsgKind::Err),
+                    },
+                }
+            }
             "marks" => {
                 let lines: Vec<String> = if self.marks.is_empty() {
                     vec!["no marks yet — m{a-z} marks the current folder, '{a-z} jumps back".into()]
@@ -803,7 +979,7 @@ impl App {
         if !errors.is_empty() {
             self.flash(errors.join(" · "), MsgKind::Warn);
         }
-        self.overlay = Overlay::Confirm { plan: Plan { ops, errors: vec![] }, scroll: 0, then_quit: false, undo: true };
+        self.overlay = Overlay::Confirm { plan: Plan { ops, ..Default::default() }, scroll: 0, then_quit: false, undo: true, sel: 0 };
     }
 
     /// `ge`: hand this listing to `$EDITOR` as `/001 name` lines (the number
@@ -933,6 +1109,429 @@ impl App {
         }
     }
 
+    // ── viewer, diff view ───────────────────────────────────────────────────
+
+    fn open_viewer(&mut self, path: PathBuf, line: Option<usize>, diff: bool) {
+        let back = if self.view == View::Viewer { self.viewer.as_ref().map(|v| v.back).unwrap_or(View::Explorer) } else { self.view };
+        let search = self.viewer.as_ref().map(|v| v.search.clone()).unwrap_or_default();
+        self.viewer = Some(Viewer { path, line, top: None, back, height: 20, total: 0, typing: None, search, hits: vec![], at: None, diff, dv: None, log: false });
+        self.view = View::Viewer;
+    }
+
+    /// The diff view over `items` (repository `root`), starting at `cur`.
+    fn open_diff(&mut self, root: PathBuf, items: Vec<crate::diffview::FileItem>, cur: usize) {
+        let path = items.get(cur).map(|i| i.path.clone()).unwrap_or_else(|| root.clone());
+        self.open_viewer(path, None, true);
+        if let Some(v) = self.viewer.as_mut() {
+            v.dv = Some(crate::diffview::DiffView::new(root, items, cur, self.cfg.diff_layout));
+        }
+    }
+
+    /// `gD`: a file's diff, or every change under a folder.
+    fn open_diff_for(&mut self, p: &Path) {
+        match crate::diffview::items_under(p) {
+            Ok((_, items)) if items.is_empty() => self.flash(format!("no changes in {}", finder::tilde(p)), MsgKind::Info),
+            Ok((root, items)) => self.open_diff(root, items, 0),
+            Err(e) => self.flash(e, MsgKind::Warn),
+        }
+    }
+
+    fn dv_out(&mut self, out: crate::diffview::Out) {
+        use crate::diffview::Out;
+        match out {
+            Out::None => {}
+            Out::Back => {
+                if let Some(v) = self.viewer.take() {
+                    self.view = v.back;
+                }
+            }
+            Out::FileView => {
+                if let Some(v) = self.viewer.as_mut() {
+                    if let Some(p) = v.dv.as_ref().and_then(|d| d.current()).map(|c| c.path.clone()) {
+                        v.path = p;
+                    }
+                    v.diff = false;
+                    (v.top, v.at) = (None, None);
+                }
+                self.flash("showing the file — d for the diff", MsgKind::Info);
+            }
+            Out::Flash(m) => self.flash(m, MsgKind::Info),
+            Out::Edit(p, line, how) => self.open_files(vec![p], line, how.unwrap_or(OpenTarget::Popup)),
+            Out::Send(p, line) => self.send_paths(vec![(p, line)]),
+            Out::SendText(t) => self.send_context(t),
+            Out::Copy(s) => match open::clipboard(&s) {
+                Ok(()) => self.flash(format!("copied {s}"), MsgKind::Ok),
+                Err(e) => self.flash(e, MsgKind::Err),
+            },
+            Out::SystemOpen(p) => {
+                if let Err(e) = open::system_open(&p) {
+                    self.flash(e, MsgKind::Err);
+                }
+            }
+            Out::Search => {
+                if let Some(v) = self.viewer.as_mut() {
+                    v.typing = Some((String::new(), 0));
+                }
+            }
+        }
+    }
+
+    /// Hand a block of text (a hunk, grep lines) to the origin pane. Agents
+    /// get it as a bracketed paste, so newlines do not submit; a shell gets
+    /// nothing typed (newlines would run commands) — it goes to the clipboard.
+    fn send_context(&mut self, text: String) {
+        let text: String = text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+        let n = text.lines().count();
+        let agent = self.origin.clone().filter(|o| crate::launch::panes().iter().any(|p| p.pane_id.as_deref() == Some(o.as_str()) && p.agent.is_some()));
+        let Some(origin) = agent else {
+            match open::clipboard(&text) {
+                Ok(()) => self.flash(format!("{n} line(s) copied — the origin pane is not an agent, so nothing was typed"), MsgKind::Ok),
+                Err(e) => self.flash(e, MsgKind::Err),
+            }
+            return;
+        };
+        match crate::launch::herdr(&["pane", "send-text", &origin, &format!("\x1b[200~{text}\n\x1b[201~")]) {
+            Ok(_) => self.flash(format!("sent {n} line(s) to the agent"), MsgKind::Ok),
+            Err(e) => self.flash(format!("send failed: {e}"), MsgKind::Err),
+        }
+    }
+
+    // ── git, archives ───────────────────────────────────────────────────────
+
+    fn reload_cwd(&mut self) {
+        let (h, s) = (self.hidden, self.sort);
+        let store = &mut self.store;
+        if let Some(b) = self.buffers.get_mut(&self.cwd) {
+            b.reload(store, h, s, false);
+        }
+        self.plan_cache = None;
+        let cwd = self.cwd.clone();
+        self.request_git(&cwd);
+    }
+
+    /// Ask the background worker for `dir`'s git status (badges, branch).
+    pub fn request_git(&mut self, dir: &Path) {
+        if !self.cfg.git_status {
+            return;
+        }
+        if self.git_tx.is_none() {
+            let (tx, req) = std::sync::mpsc::channel::<PathBuf>();
+            let (done, rx) = std::sync::mpsc::channel::<GitResult>();
+            std::thread::spawn(move || {
+                while let Ok(d) = req.recv() {
+                    let mut dirs = vec![d];
+                    while let Ok(more) = req.try_recv() {
+                        if !dirs.contains(&more) {
+                            dirs.push(more);
+                        }
+                    }
+                    for d in dirs {
+                        let (m, b) = crate::entry::git_status_full(&d);
+                        if done.send((d, m, b)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+            self.git_tx = Some(tx);
+            self.git_rx = Some(rx);
+        }
+        if self.git_tx.as_ref().is_some_and(|tx| tx.send(dir.to_path_buf()).is_ok()) {
+            self.git_pending.insert(dir.to_path_buf());
+        }
+    }
+
+    /// Take finished git statuses; true when a listing got new badges.
+    fn poll_git(&mut self) -> bool {
+        let Some(rx) = &self.git_rx else { return false };
+        let mut changed = false;
+        while let Ok((d, m, b)) = rx.try_recv() {
+            self.git_pending.remove(&d);
+            if let Some(buf) = self.buffers.get_mut(&d) {
+                buf.git = m;
+                buf.branch = b;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Background work the screen is waiting for.
+    pub fn busy(&self) -> bool {
+        !self.git_pending.is_empty() || self.preview.pending.is_some() || self.viewer_cache.pending.is_some()
+    }
+
+    /// The plan the edited buffers make, rebuilt only when their text changes.
+    pub fn pending_plan(&mut self) -> Option<std::rc::Rc<Plan>> {
+        use std::hash::{Hash, Hasher};
+        let modified = self.modified_dirs();
+        if modified.is_empty() {
+            self.plan_cache = None;
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for d in &modified {
+            d.hash(&mut h);
+            for l in &self.buffers[d].lines {
+                l.id.hash(&mut h);
+                l.text.hash(&mut h);
+            }
+        }
+        let key = h.finish();
+        if let Some((k, p)) = &self.plan_cache {
+            if *k == key {
+                return Some(p.clone());
+            }
+        }
+        let p = std::rc::Rc::new(plan::build(self.buffers.values(), &self.store));
+        self.plan_cache = Some((key, p.clone()));
+        Some(p)
+    }
+
+    fn git_op(&mut self, op: &str, ids: &[u64]) {
+        let paths: Vec<PathBuf> = ids.iter().filter_map(|id| self.store.get(*id)).map(|e| e.path.clone()).collect();
+        self.git_paths(op, paths);
+    }
+
+    /// `stage` / `unstage` right away; `restore` asks first.
+    fn git_paths(&mut self, op: &str, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            self.flash("no saved entries here", MsgKind::Warn);
+            return;
+        }
+        let root = match crate::git::guard(&paths[0]) {
+            Ok(r) => r,
+            Err(e) => {
+                self.flash(e, MsgKind::Err);
+                return;
+            }
+        };
+        let n = paths.len();
+        if op == "restore" {
+            let lines = paths.iter().map(|p| finder::tilde(p)).collect();
+            let title = format!("Discard unstaged changes in {n} file{}? This cannot be undone", if n == 1 { "" } else { "s" });
+            self.overlay = Overlay::Ask { title, lines, then: Deferred::Restore(paths) };
+            return;
+        }
+        let r = if op == "stage" { crate::git::stage(&root, &paths) } else { crate::git::unstage(&root, &paths) };
+        match r {
+            Ok(()) => self.flash(format!("{op}d {n} path{}", if n == 1 { "" } else { "s" }), MsgKind::Ok),
+            Err(e) => self.flash(format!("{op}: {e}"), MsgKind::Err),
+        }
+        self.after_git();
+    }
+
+    fn run_deferred(&mut self, d: Deferred) {
+        match d {
+            Deferred::Restore(paths) => {
+                let r = crate::git::guard(&paths[0]).and_then(|root| crate::git::restore(&root, &paths));
+                match r {
+                    Ok(()) => self.flash(format!("restored {} file(s) to their staged state", paths.len()), MsgKind::Ok),
+                    Err(e) => self.flash(format!("restore: {e}"), MsgKind::Err),
+                }
+                self.after_git();
+                if !self.buf().modified() {
+                    self.reload_cwd();
+                }
+            }
+        }
+    }
+
+    /// Statuses changed: refresh badges, the Git tab and open diffs.
+    fn after_git(&mut self) {
+        let dirs: Vec<PathBuf> = self.buffers.keys().cloned().collect();
+        for d in dirs {
+            self.request_git(&d);
+        }
+        if let Some(f) = self.finder.as_mut() {
+            if matches!(f.kind, FinderKind::Git | FinderKind::Dash) {
+                let sel = f.sel;
+                f.restart();
+                f.sel = sel;
+            }
+        }
+        self.preview.invalidate();
+        if let Some(dv) = self.viewer.as_mut().and_then(|v| v.dv.as_mut()) {
+            dv.invalidate();
+        }
+    }
+
+    fn extract(&mut self, ids: &[u64]) {
+        let (mut done, mut errs) = (Vec::new(), Vec::new());
+        for id in ids {
+            let Some(e) = self.store.get(*id).cloned() else { continue };
+            match extract_archive(&e.path) {
+                Ok(d) => done.push(d),
+                Err(err) => errs.push(format!("{}: {err}", e.name)),
+            }
+        }
+        if !self.buf().modified() {
+            self.reload_cwd();
+            if let Some(name) = done.first().and_then(|d| d.file_name()).map(|n| format!("{}/", n.to_string_lossy())) {
+                let b = self.buf_mut();
+                if let Some(i) = b.lines.iter().position(|l| l.text == name) {
+                    b.row = i;
+                }
+            }
+        }
+        match (done.len(), errs.first()) {
+            (_, Some(e)) => self.flash(format!("extract: {} ok, {e}", done.len()), MsgKind::Err),
+            (0, None) => self.flash("extract: no saved archive on these lines", MsgKind::Warn),
+            (_, None) => self.flash(format!("extracted into {}", done.iter().map(|d| finder::tilde(d)).collect::<Vec<_>>().join(", ")), MsgKind::Ok),
+        }
+    }
+
+    fn archive(&mut self, name: &str, tar: bool, ids: &[u64]) {
+        let entries: Vec<PathBuf> = ids.iter().filter_map(|id| self.store.get(*id)).filter(|e| e.path.parent() == Some(self.cwd.as_path())).map(|e| e.path.clone()).collect();
+        if entries.is_empty() {
+            self.flash("no saved entries of this folder on these lines", MsgKind::Warn);
+            return;
+        }
+        match create_archive(&self.cwd, name, tar, &entries) {
+            Ok(p) => {
+                if !self.buf().modified() {
+                    self.reload_cwd();
+                }
+                self.flash(format!("packed {} entr{} into {}", entries.len(), if entries.len() == 1 { "y" } else { "ies" }, finder::tilde(&p)), MsgKind::Ok);
+            }
+            Err(e) => self.flash(e, MsgKind::Err),
+        }
+    }
+
+    // ── history, conflicts ──────────────────────────────────────────────────
+
+    /// Remember an applied batch for `:history` (kept across sessions).
+    fn record(&mut self, plan: &Plan, rep: &apply::Report) {
+        let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        self.journal.push(Batch { when, lines: plan::describe(&plan.ops), undo: rep.undo.clone(), permanent: rep.permanent });
+        if self.journal.len() > 50 {
+            self.journal.remove(0);
+        }
+        if let Ok(t) = serde_json::to_string(&self.journal) {
+            let _ = std::fs::create_dir_all(&self.cfg.state_dir);
+            let _ = std::fs::write(journal_file(&self.cfg), t);
+        }
+    }
+
+    /// Review rolling back batch `i` of the journal (as `U` does for the last).
+    fn undo_batch(&mut self, i: usize) {
+        if !self.modified_dirs().is_empty() {
+            self.flash("save (:w) or discard (:e!) the current edits first", MsgKind::Warn);
+            return;
+        }
+        let Some(b) = self.journal.get(i) else { return };
+        if b.undo.is_empty() {
+            self.flash("that batch only deleted permanently — nothing to bring back", MsgKind::Warn);
+            return;
+        }
+        let exists = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+        let ops: Vec<plan::Op> = b
+            .undo
+            .iter()
+            .filter(|op| match op {
+                plan::Op::Move { src, .. } | plan::Op::Delete { src, .. } => exists(src),
+                plan::Op::Retarget { path, .. } => std::fs::read_link(path).is_ok(),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        if ops.is_empty() {
+            self.flash("everything in that batch was changed on disk since — nothing to undo", MsgKind::Warn);
+            return;
+        }
+        let mut plan = Plan { ops, ..Default::default() };
+        plan::revalidate(&mut plan);
+        self.overlay = Overlay::Confirm { plan, scroll: 0, then_quit: false, undo: true, sel: 0 };
+    }
+
+    /// Buffer lines whose destination clashes (dir, row, key, reason).
+    fn conflict_lines(&self) -> Vec<(PathBuf, usize, String, String)> {
+        let plan = plan::build(self.buffers.values(), &self.store);
+        let mut dirs: Vec<&PathBuf> = self.buffers.keys().collect();
+        dirs.sort();
+        let mut out = Vec::new();
+        for d in dirs {
+            let b = &self.buffers[d];
+            for (i, l) in b.lines.iter().enumerate() {
+                let entry = l.id.and_then(|id| self.store.get(id));
+                let (name, _) = plan::line_parts(&l.text, entry);
+                let Ok(Some((rel, _))) = plan::parse_name(name) else { continue };
+                let dst = plan::normalize(&b.dir.join(rel));
+                let k = plan::key(&dst);
+                // an untouched line keeps its name; the edited ones move
+                if entry.is_some_and(|e| plan::key(&e.path) == k) {
+                    continue;
+                }
+                if let Some(why) = plan.conflicts.get(&k) {
+                    out.push((d.clone(), i, k, why.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// `c` in the conflict report: give clashing names a counter
+    /// (`report 2.pdf`), skipping names that exist or are taken by the plan.
+    fn number_conflicts(&mut self) {
+        let lines = self.conflict_lines();
+        if lines.is_empty() {
+            return;
+        }
+        let plan = plan::build(self.buffers.values(), &self.store);
+        let mut taken: HashSet<String> = plan.ops.iter().filter_map(|o| o.dst()).map(plan::key).collect();
+        let mut first_kept: HashSet<String> = HashSet::new();
+        let mut snapped: HashSet<PathBuf> = HashSet::new();
+        let mut n = 0;
+        for (dir, row, k, why) in lines {
+            // of several new names for one path, the first keeps it
+            if why.starts_with("two entries") && first_kept.insert(k.clone()) {
+                continue;
+            }
+            let Some(b) = self.buffers.get_mut(&dir) else { continue };
+            let text = b.lines[row].text.clone();
+            let entry = b.lines[row].id.and_then(|id| self.store.get(id));
+            let (name, link) = plan::line_parts(&text, entry);
+            let link = link.map(|t| format!(" -> {t}")).unwrap_or_default();
+            let slash = if name.trim_end().ends_with('/') { "/" } else { "" };
+            let core = name.trim().trim_end_matches('/');
+            let (lead, last) = match core.rfind('/') {
+                Some(i) => (&core[..=i], &core[i + 1..]),
+                None => ("", core),
+            };
+            let (stem, ext) = match last.rfind('.') {
+                Some(i) if i > 0 && slash.is_empty() => (&last[..i], &last[i..]),
+                _ => (last, ""),
+            };
+            for c in 2.. {
+                let cand = format!("{lead}{stem} {c}{ext}");
+                let dst = plan::normalize(&dir.join(&cand));
+                let ck = plan::key(&dst);
+                if !taken.contains(&ck) && std::fs::symlink_metadata(&dst).is_err() {
+                    taken.insert(ck);
+                    if snapped.insert(dir.clone()) {
+                        b.snapshot();
+                    }
+                    b.lines[row].text = format!("{cand}{slash}{link}");
+                    n += 1;
+                    break;
+                }
+            }
+        }
+        self.plan_cache = None;
+        self.flash(format!("numbered {n} clashing name{} — :w to review", if n == 1 { "" } else { "s" }), MsgKind::Info);
+    }
+
+    /// `o` in the conflict report: the first clashing line.
+    fn jump_conflict(&mut self) {
+        if let Some((dir, row, _, why)) = self.conflict_lines().into_iter().next() {
+            self.goto(&dir, None);
+            let b = self.buf_mut();
+            b.row = row;
+            b.clamp();
+            self.flash(format!("✗ {why}"), MsgKind::Warn);
+        }
+    }
+
     // ── keys ────────────────────────────────────────────────────────────────
 
     fn key(&mut self, k: KeyEvent) {
@@ -969,18 +1568,93 @@ impl App {
     fn overlay_key(&mut self, k: KeyEvent) {
         let ov = std::mem::replace(&mut self.overlay, Overlay::None);
         match ov {
-            Overlay::Confirm { plan, mut scroll, then_quit, undo } => match k.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.execute(plan, then_quit, undo),
+            Overlay::Confirm { mut plan, scroll, then_quit, undo, mut sel } => match k.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter if plan.errors.is_empty() => self.execute(plan, then_quit, undo),
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    self.flash("fix the problems first — x drops the op under the cursor", MsgKind::Warn);
+                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo, sel };
+                }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => self.flash("cancelled — edits kept", MsgKind::Info),
                 KeyCode::Char('j') | KeyCode::Down => {
-                    scroll += 1;
-                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo };
+                    sel = (sel + 1).min(plan.ops.len().saturating_sub(1));
+                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo, sel };
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    scroll = scroll.saturating_sub(1);
-                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo };
+                    sel = sel.saturating_sub(1);
+                    self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo, sel };
                 }
-                _ => self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo },
+                KeyCode::Char('x') | KeyCode::Char('d') => {
+                    if sel < plan.ops.len() {
+                        let gone = plan::describe(&plan.ops[sel..=sel]).remove(0);
+                        plan.ops.remove(sel);
+                        self.flash(format!("dropped: {}", gone.split_whitespace().collect::<Vec<_>>().join(" ")), MsgKind::Info);
+                    }
+                    if plan.ops.is_empty() {
+                        self.flash("nothing left to apply — edits kept", MsgKind::Info);
+                    } else {
+                        plan::revalidate(&mut plan);
+                        sel = sel.min(plan.ops.len() - 1);
+                        self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo, sel };
+                    }
+                }
+                KeyCode::Char('o') | KeyCode::Char('g') => {
+                    // to the line that makes this op (a delete: its folder)
+                    if let Some(op) = plan.ops.get(sel) {
+                        let target = match op {
+                            plan::Op::Retarget { path, .. } => Some(path.clone()),
+                            op => op.dst().or(op.src()).map(Path::to_path_buf),
+                        };
+                        if let Some(t) = target {
+                            let dir = t.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"));
+                            let name = t.file_name().map(|n| n.to_string_lossy().into_owned());
+                            if dir.is_dir() {
+                                self.goto(&dir, name.as_deref());
+                                self.view = View::Explorer;
+                            }
+                        }
+                    }
+                }
+                _ => self.overlay = Overlay::Confirm { plan, scroll, then_quit, undo, sel },
+            },
+            Overlay::Ask { title, lines, then } => match k.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.run_deferred(then),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => self.flash("cancelled", MsgKind::Info),
+                _ => self.overlay = Overlay::Ask { title, lines, then },
+            },
+            Overlay::History { mut sel } => match k.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    sel = (sel + 1).min(self.journal.len().saturating_sub(1));
+                    self.overlay = Overlay::History { sel };
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.overlay = Overlay::History { sel: sel.saturating_sub(1) };
+                }
+                KeyCode::Char('u') | KeyCode::Enter => {
+                    let i = self.journal.len().saturating_sub(1 + sel);
+                    self.undo_batch(i);
+                }
+                KeyCode::Char('y') => {
+                    let i = self.journal.len().saturating_sub(1 + sel);
+                    let text = self.journal.get(i).map(|b| b.lines.join("\n")).unwrap_or_default();
+                    match open::clipboard(&text) {
+                        Ok(()) => self.flash("copied the batch", MsgKind::Ok),
+                        Err(e) => self.flash(e, MsgKind::Err),
+                    }
+                    self.overlay = Overlay::History { sel };
+                }
+                _ => {}
+            },
+            Overlay::Conflicts { lines, mut scroll } => match k.code {
+                KeyCode::Char('c') => self.number_conflicts(),
+                KeyCode::Char('o') => self.jump_conflict(),
+                KeyCode::Char('j') | KeyCode::Down => {
+                    scroll += 1;
+                    self.overlay = Overlay::Conflicts { lines, scroll };
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.overlay = Overlay::Conflicts { lines, scroll: scroll.saturating_sub(1) };
+                }
+                _ => {}
             },
             Overlay::QuitPrompt => match k.code {
                 KeyCode::Char('s') | KeyCode::Char('w') | KeyCode::Char('y') => self.save(true),
@@ -1084,11 +1758,84 @@ impl App {
                 return;
             }
             (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
-                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git];
+                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git, FinderKind::Dash];
                 let i = order.iter().position(|x| *x == f.kind).unwrap_or(0);
                 let n = if k.code == KeyCode::BackTab { (i + order.len() - 1) % order.len() } else { (i + 1) % order.len() };
-                f.set_kind(order[n]);
+                if order[n] == FinderKind::Dash {
+                    let pending = self.pending_tags();
+                    if let Some(f) = self.finder.as_mut() {
+                        f.pending = pending;
+                    }
+                }
+                if let Some(f) = self.finder.as_mut() {
+                    f.set_kind(order[n]);
+                }
                 self.preview_scroll = 0;
+                return;
+            }
+            (KeyCode::Enter, _, _) if f.kind == FinderKind::Git && !self.pick => {
+                // the diff view, with every listed change one ⇥ away
+                let (n, sel) = (f.len(), f.sel);
+                let items: Vec<crate::diffview::FileItem> = f
+                    .items(0, n)
+                    .into_iter()
+                    .filter(|it| !it.is_dir)
+                    .map(|it| crate::diffview::FileItem { path: it.abs, rel: it.display, git: it.git })
+                    .collect();
+                let root = f.root.clone();
+                if items.is_empty() {
+                    return;
+                }
+                self.open_diff(root, items, sel);
+                return;
+            }
+            (KeyCode::Char('a'), true, _) if f.kind == FinderKind::Git => {
+                // stage the selection (or marked files); staged ones get unstaged
+                let picked: Vec<(PathBuf, bool)> = if f.marked.is_empty() {
+                    f.selected().map(|it| (it.abs, it.git.is_some_and(|g| g.staged && !g.unstaged))).into_iter().collect()
+                } else {
+                    let n = f.len();
+                    let all = f.items(0, n);
+                    f.marked.iter().map(|m| (m.path.clone(), all.iter().find(|it| it.abs == m.path).and_then(|it| it.git).is_some_and(|g| g.staged && !g.unstaged))).collect()
+                };
+                f.marked.clear();
+                let (unstage, stage): (Vec<_>, Vec<_>) = picked.into_iter().partition(|(_, staged)| *staged);
+                if !stage.is_empty() {
+                    self.git_paths("stage", stage.into_iter().map(|(p, _)| p).collect());
+                }
+                if !unstage.is_empty() {
+                    self.git_paths("unstage", unstage.into_iter().map(|(p, _)| p).collect());
+                }
+                return;
+            }
+            (KeyCode::Char('d'), _, true) if f.kind == FinderKind::Git => {
+                let paths: Vec<PathBuf> = if f.marked.is_empty() { f.selected().map(|it| it.abs).into_iter().collect() } else { f.marked.iter().map(|m| m.path.clone()).collect() };
+                self.git_paths("restore", paths);
+                return;
+            }
+            (KeyCode::Char('s'), _, true) => {
+                // grep hits (marked, else the selection) as text for an agent
+                let hits: Vec<finder::Item> = if f.marked.is_empty() {
+                    f.selected().into_iter().collect()
+                } else {
+                    let n = f.len();
+                    f.items(0, n).into_iter().filter(|it| f.marked.iter().any(|m| m.path == it.abs && m.line == it.line)).collect()
+                };
+                let start = self.start.clone();
+                let text: Vec<String> = hits
+                    .iter()
+                    .map(|it| {
+                        let rel = it.abs.strip_prefix(&start).map(|r| r.display().to_string()).unwrap_or_else(|_| it.abs.display().to_string());
+                        match (&it.grep_text, it.line) {
+                            (Some(t), Some(l)) => format!("{rel}:{l}: {}", t.trim()),
+                            _ => rel,
+                        }
+                    })
+                    .collect();
+                if text.is_empty() {
+                    return;
+                }
+                self.send_context(text.join("\n"));
                 return;
             }
             (KeyCode::Enter, _, _) => open_how = Some(self.cfg.open),
@@ -1145,47 +1892,15 @@ impl App {
             (KeyCode::Char('f'), true, _) => self.preview_scroll += 10,
             (KeyCode::Char('b'), true, _) => self.preview_scroll = self.preview_scroll.saturating_sub(10),
             (KeyCode::Char('p'), _, true) | (KeyCode::Char('l'), true, _) => self.finder_preview = !self.finder_preview,
-            (KeyCode::Char('u'), true, _) => {
-                f.query.clear();
-                f.qcur = 0;
-                edited = Some(false);
+            (KeyCode::Backspace, false, false) if f.query.is_empty() && !self.finder_only => {
+                self.view = View::Explorer;
+                return;
             }
-            (KeyCode::Char('w'), true, _) => {
-                let chars: Vec<char> = f.query.chars().collect();
-                let mut a = f.qcur;
-                while a > 0 && chars[a - 1] == ' ' {
-                    a -= 1;
-                }
-                while a > 0 && chars[a - 1] != ' ' {
-                    a -= 1;
-                }
-                f.query = chars[..a].iter().chain(chars[f.qcur..].iter()).collect();
-                f.qcur = a;
-                edited = Some(false);
-            }
-            (KeyCode::Char('a'), true, _) | (KeyCode::Home, _, _) => f.qcur = 0,
-            (KeyCode::Char('e'), _, true) | (KeyCode::End, _, _) => f.qcur = f.query.chars().count(),
-            (KeyCode::Left, _, _) => f.qcur = f.qcur.saturating_sub(1),
-            (KeyCode::Right, _, _) => f.qcur = (f.qcur + 1).min(f.query.chars().count()),
-            (KeyCode::Backspace, _, _) => {
-                if f.qcur > 0 {
-                    let b = crate::buffer::byte_at(&f.query, f.qcur - 1);
-                    f.query.remove(b);
-                    f.qcur -= 1;
-                    edited = Some(false);
-                } else if f.query.is_empty() && !self.finder_only {
-                    self.view = View::Explorer;
-                    return;
+            _ => {
+                if let crate::input::Edit::Changed(appended) = crate::input::edit(&mut f.query, &mut f.qcur, k) {
+                    edited = Some(appended);
                 }
             }
-            (KeyCode::Char(c), false, false) => {
-                let at_end = f.qcur == f.query.chars().count();
-                let b = crate::buffer::byte_at(&f.query, f.qcur);
-                f.query.insert(b, c);
-                f.qcur += 1;
-                edited = Some(at_end);
-            }
-            _ => {}
         }
         if let Some(appended) = edited {
             f.query_changed(appended);
@@ -1264,26 +1979,38 @@ impl App {
             self.view = View::Explorer;
             return;
         };
-        if let Some(t) = v.typing.as_mut() {
+        if let Some((t, cur)) = v.typing.as_mut() {
             match k.code {
                 KeyCode::Esc => v.typing = None,
                 KeyCode::Enter => {
-                    let t = v.typing.take().unwrap_or_default();
+                    let (t, _) = v.typing.take().unwrap_or_default();
                     if !t.is_empty() {
                         v.search = t;
+                    }
+                    if let (true, Some(dv)) = (v.diff, v.dv.as_mut()) {
+                        dv.search = v.search.clone();
+                        dv.find();
+                        let out = dv.jump_hit(true);
+                        self.dv_out(out);
+                        return;
                     }
                     let from = v.top.unwrap_or(0) + v.height / 3;
                     self.viewer_find(from, true);
                 }
-                KeyCode::Backspace => {
-                    if t.pop().is_none() {
-                        v.typing = None;
-                    }
+                KeyCode::Backspace if t.is_empty() => v.typing = None,
+                _ => {
+                    crate::input::edit(t, cur, k);
                 }
-                KeyCode::Char('u') if ctrl => t.clear(),
-                KeyCode::Char(c) if !ctrl => t.push(c),
-                _ => {}
             }
+            return;
+        }
+        if let (true, Some(dv)) = (v.diff, v.dv.as_mut()) {
+            if (k.code, ctrl) == (KeyCode::Char('c'), true) {
+                self.try_quit(false);
+                return;
+            }
+            let out = dv.key(k, &mut self.viewed);
+            self.dv_out(out);
             return;
         }
         let h = v.height.max(1);
@@ -1292,6 +2019,8 @@ impl App {
         let mut scroll = |d: isize| v.top = Some((top as isize + d).clamp(0, max_top as isize) as usize);
         let path = v.path.clone();
         let line = v.line;
+        // cache index → file line (the viewer renders from `start`)
+        let start = line.map(|l| l.saturating_sub(crate::preview::VIEWER_LINES / 4).max(1)).unwrap_or(1);
         match (k.code, ctrl) {
             (KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter, false) => scroll(1),
             (KeyCode::Char('k') | KeyCode::Up, false) => scroll(-1),
@@ -1319,12 +2048,50 @@ impl App {
                 Ok(()) => self.flash(format!("copied {}", finder::tilde(&path)), MsgKind::Ok),
                 Err(e) => self.flash(e, MsgKind::Err),
             },
-            (KeyCode::Char('/'), false) => v.typing = Some(String::new()),
+            (KeyCode::Char('/'), false) => v.typing = Some((String::new(), 0)),
+            (KeyCode::Char('L'), false) => {
+                v.log = !v.log;
+                (v.top, v.at) = (None, None);
+                v.hits.clear();
+                let msg = if v.log { "git log of this path — L for the file" } else { "showing the file" };
+                self.flash(msg, MsgKind::Info);
+            }
+            (KeyCode::Char('d'), false) => {
+                if v.dv.is_none() {
+                    match crate::diffview::items_under(&path) {
+                        Ok((root, items)) if !items.is_empty() => v.dv = Some(crate::diffview::DiffView::new(root, items, 0, self.cfg.diff_layout)),
+                        Ok(_) => {
+                            self.flash("no changes against HEAD", MsgKind::Info);
+                            return;
+                        }
+                        Err(e) => {
+                            self.flash(e, MsgKind::Warn);
+                            return;
+                        }
+                    }
+                }
+                v.diff = true;
+                v.log = false;
+                self.flash("diff — d for the file, ]c [c hunks, s split", MsgKind::Info);
+            }
             (KeyCode::Char('p'), false) => {
-                // the current search hit (cache index → file line), else the line it was opened at
-                let start = line.map(|l| l.saturating_sub(crate::preview::VIEWER_LINES / 4).max(1)).unwrap_or(1);
+                // the current search hit, else the line it was opened at
                 let line = v.at.map(|i| start + i).or(line);
                 self.send_paths(vec![(path, line)]);
+            }
+            (KeyCode::Char('P'), false) => {
+                // a few lines around the current hit (or the screen's focus)
+                let at = v.at.unwrap_or(top + h / 3) + start;
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let (a, z) = (at.saturating_sub(5).max(1), at + 5);
+                let body: Vec<&str> = text.lines().skip(a - 1).take(z + 1 - a).collect();
+                if body.is_empty() {
+                    self.flash("nothing to send here", MsgKind::Info);
+                    return;
+                }
+                let rel = path.strip_prefix(&self.start).map(|r| r.display().to_string()).unwrap_or_else(|_| path.display().to_string());
+                let z = a + body.len() - 1;
+                self.send_context(format!("{rel}:{a}-{z}\n```\n{}\n```", body.join("\n")));
             }
             (KeyCode::Char('n') | KeyCode::Char('N'), false) => {
                 if v.search.is_empty() {
@@ -1377,6 +2144,13 @@ impl App {
                     }
                 }
             }
+            MouseEventKind::Down(MouseButton::Left) if self.view == View::Explorer && m.row == self.head_y && matches!(self.overlay, Overlay::None) => {
+                // a path segment in the header: jump to that folder
+                if let Some((_, _, p)) = self.crumbs.iter().find(|(a, z, _)| m.column >= *a && m.column < *z).cloned() {
+                    let name = self.cwd.strip_prefix(&p).ok().and_then(|r| r.components().next()).map(|c| c.as_os_str().to_string_lossy().into_owned());
+                    self.goto(&p, name.as_deref());
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) if inside && matches!(self.overlay, Overlay::None) => {
                 let rel = (m.row - a.y) as usize;
                 let dbl = self.last_click.is_some_and(|(t, r)| r == m.row && t.elapsed() < Duration::from_millis(400));
@@ -1427,14 +2201,15 @@ impl App {
             Err(e) => self.flash(format!("{}: {e}", argv[0]), MsgKind::Err),
         }
         // The file may have changed; refresh listings that have no edits.
-        let (h, s, g) = (self.hidden, self.sort, self.cfg.git_status);
-        let store = &mut self.store;
-        if let Some(b) = self.buffers.get_mut(&self.cwd) {
-            if !b.modified() {
-                b.reload(store, h, s, g);
-            }
+        if !self.buf().modified() {
+            self.reload_cwd();
         }
-        self.preview.key = None;
+        self.preview.invalidate();
+        self.viewer_cache.invalidate();
+        self.gutter = None;
+        if let Some(dv) = self.viewer.as_mut().and_then(|v| v.dv.as_mut()) {
+            dv.invalidate();
+        }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
@@ -1443,12 +2218,22 @@ impl App {
             if let Some(f) = self.finder.as_mut() {
                 f.tick();
             }
+            self.poll_git();
+            self.preview.poll();
+            self.viewer_cache.poll();
             terminal.draw(|fr| crate::ui::draw(fr, self))?;
             if self.quit {
                 return Ok(());
             }
             let busy = self.finder.as_ref().is_some_and(|f| f.walking()) && self.view == View::Finder;
-            let timeout = if busy { Duration::from_millis(40) } else { Duration::from_millis(250) };
+            // previews and git badges land from worker threads: look again soon
+            let timeout = if self.busy() {
+                Duration::from_millis(16)
+            } else if busy {
+                Duration::from_millis(40)
+            } else {
+                Duration::from_millis(250)
+            };
             if event::poll(timeout)? {
                 match event::read()? {
                     Event::Key(k) => self.key(k),
@@ -1691,10 +2476,10 @@ mod tests {
         let (t, mut app) = app_in("journal");
         app.cfg.delete = crate::config::DeleteMethod::Permanent;
         let mv = Op::Move { src: t.0.join("a.txt"), dst: t.0.join("c.txt"), dir: false };
-        app.execute(Plan { ops: vec![mv], errors: vec![] }, false, false);
+        app.execute(Plan { ops: vec![mv], ..Default::default() }, false, false);
         assert!(app.last_batch.is_some());
         let del = Op::Delete { src: t.0.join("b.txt"), dir: false };
-        app.execute(Plan { ops: vec![del], errors: vec![] }, false, false);
+        app.execute(Plan { ops: vec![del], ..Default::default() }, false, false);
         assert!(app.last_batch.is_none());
     }
 
@@ -1706,5 +2491,84 @@ mod tests {
         assert!(n > 0 && n < all);
         assert!(some.iter().all(|(_, r)| r.iter().all(|(k, v)| (k.to_string() + v).to_lowercase().contains("chmod"))));
         assert!(crate::ui::help_rows("zzzz-nothing").is_empty());
+    }
+
+    #[test]
+    fn deleted_file_opens_as_diff() {
+        let (t, mut app) = app_in("viewer-diff");
+        let g = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&t.0).output().unwrap();
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(t.0.join("gone.txt"), "bye\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-qm", "x"]);
+        std::fs::remove_file(t.0.join("gone.txt")).unwrap();
+        app.open_files(vec![t.0.join("gone.txt")], None, OpenTarget::View);
+        let v = app.viewer.as_mut().unwrap();
+        assert!(v.diff);
+        let f = v.dv.as_mut().and_then(|d| d.file()).expect("diff loaded");
+        assert_eq!((f.status, f.stat()), ('D', (0, 1)));
+        app.open_files(vec![t.0.join("a.txt")], None, OpenTarget::View);
+        assert!(app.viewer.as_ref().is_some_and(|v| !v.diff));
+        // a.txt is committed and unchanged: d has nothing to show
+        app.viewer_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.viewer.as_ref().is_some_and(|v| !v.diff));
+        std::fs::write(t.0.join("a.txt"), "changed\n").unwrap();
+        app.viewer_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(app.viewer.as_ref().is_some_and(|v| v.diff));
+    }
+
+    #[test]
+    fn conflicts_get_numbered() {
+        let (t, mut app) = app_in("conflict-fix");
+        let r = row_of(&app, "a.txt");
+        app.buf_mut().lines[r].text = "b.txt".into();
+        app.buf_mut().lines.push(crate::buffer::Line::new("new.md"));
+        app.buf_mut().lines.push(crate::buffer::Line::new("new.md"));
+        app.act(Action::Save);
+        assert!(matches!(app.overlay, Overlay::Conflicts { .. }));
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        let texts: Vec<String> = app.buf().lines.iter().map(|l| l.text.clone()).collect();
+        assert!(texts.contains(&"b 2.txt".to_string()) && texts.contains(&"new.md".to_string()) && texts.contains(&"new 2.md".to_string()), "{texts:?}");
+        let plan = plan::build(app.buffers.values(), &app.store);
+        assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+        assert!(plan.ops.contains(&plan::Op::Move { src: t.0.join("a.txt"), dst: t.0.join("b 2.txt"), dir: false }));
+    }
+
+    #[test]
+    fn confirm_drops_ops_and_history_records() {
+        let (t, mut app) = app_in("confirm-drop");
+        let r = row_of(&app, "a.txt");
+        app.buf_mut().lines[r].text = "z.txt".into();
+        let r = row_of(&app, "b.txt");
+        app.buf_mut().lines.remove(r);
+        app.act(Action::Save);
+        let key = |app: &mut App, c: char| app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        // ops: the rename, then the delete; drop the delete
+        key(&mut app, 'j');
+        key(&mut app, 'x');
+        let Overlay::Confirm { plan, .. } = &app.overlay else { panic!("dialog closed") };
+        assert_eq!(plan.ops.len(), 1);
+        key(&mut app, 'y');
+        assert!(t.0.join("z.txt").exists() && t.0.join("b.txt").exists());
+        assert_eq!(app.journal.len(), 1);
+        assert_eq!(load_journal(&app.cfg).len(), 1, "persisted");
+        app.command("history");
+        key(&mut app, 'u');
+        let Overlay::Confirm { plan, undo: true, .. } = &app.overlay else { panic!("no undo review") };
+        assert_eq!(plan.ops, vec![plan::Op::Move { src: t.0.join("z.txt"), dst: t.0.join("a.txt"), dir: false }]);
+    }
+
+    #[test]
+    fn plan_export_writes_text() {
+        let (t, mut app) = app_in("plan-export");
+        let r = row_of(&app, "a.txt");
+        app.buf_mut().lines[r].text = "c.txt".into();
+        app.command("plan > plan.txt");
+        let text = std::fs::read_to_string(t.0.join("plan.txt")).unwrap();
+        assert!(text.contains("rename") && text.contains("c.txt"), "{text}");
+        app.command("plan > plan.txt");
+        assert!(app.msg.as_ref().is_some_and(|m| m.0.contains("not overwritten")));
     }
 }

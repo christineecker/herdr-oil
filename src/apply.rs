@@ -76,7 +76,7 @@ pub fn move_path(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
-fn unique(dir: &Path, name: &str) -> PathBuf {
+pub fn unique(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if fs::symlink_metadata(&first).is_err() {
         return first;

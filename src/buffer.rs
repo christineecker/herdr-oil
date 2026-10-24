@@ -3,7 +3,7 @@
 //! renames, deleting the line deletes, pasting a yanked line copies/moves,
 //! and lines without an id are new files.
 
-use crate::entry::{Entry, Sort, Store};
+use crate::entry::{Branch, Entry, Git, Sort, Store};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,10 @@ pub struct Buffer {
     pub scroll: usize,
     pub hscroll: usize,
     pub view_h: usize,
-    pub git: HashMap<String, char>,
+    pub git: HashMap<String, Git>,
+    pub branch: Option<Branch>,
+    /// `gG`: list only entries with a git status (and folders holding some).
+    pub only_changed: bool,
     pub error: Option<String>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
@@ -75,6 +78,8 @@ impl Buffer {
             hscroll: 0,
             view_h: 20,
             git: HashMap::new(),
+            branch: None,
+            only_changed: false,
             error: None,
             undo: vec![],
             redo: vec![],
@@ -106,8 +111,25 @@ impl Buffer {
         if self.lines.is_empty() {
             self.lines.push(Line::new(""));
         }
+        // the git filter needs the status now; otherwise it may arrive later
+        // from the background worker (see `App::request_git`)
+        if git || self.only_changed {
+            (self.git, self.branch) = crate::entry::git_status_full(&self.dir);
+        }
+        if self.only_changed {
+            let git = &self.git;
+            let keep = |l: &Line| {
+                let name = crate::plan::split_link(&l.text).0.trim_end_matches('/');
+                git.get(name).is_some_and(|g| g.letter != '!')
+            };
+            self.lines.retain(keep);
+            let ids: std::collections::HashSet<u64> = self.lines.iter().filter_map(|l| l.id).collect();
+            self.original.retain(|id| ids.contains(id));
+            if self.lines.is_empty() {
+                self.lines.push(Line::new(""));
+            }
+        }
         self.pristine = self.lines.clone();
-        self.git = if git { crate::entry::git_status(&self.dir) } else { HashMap::new() };
         self.undo.clear();
         self.redo.clear();
         if let Some(k) = keep {
@@ -125,6 +147,9 @@ impl Buffer {
             return;
         }
         let mut es: Vec<Entry> = self.original.iter().filter_map(|id| store.get(*id).cloned()).collect();
+        if es.is_empty() {
+            return;
+        }
         crate::entry::sort_entries(&mut es, sort, store.reverse);
         self.original = es.iter().map(|e| e.id).collect();
         self.lines = es.iter().map(|e| Line { id: Some(e.id), text: e.display() }).collect();
@@ -167,6 +192,24 @@ impl Buffer {
             return true;
         }
         false
+    }
+
+    /// Depth of the undo stack, for [`Buffer::squash_to`].
+    pub fn undo_len(&self) -> usize {
+        self.undo.len()
+    }
+
+    /// Fold every snapshot taken since the stack was `len` deep into one
+    /// undo step (a recipe of several commands undoes at once).
+    pub fn squash_to(&mut self, len: usize) {
+        self.undo.truncate(len + 1);
+    }
+
+    /// The line names an entry with a git status (ignored entries do not count).
+    pub fn git_dirty(&self, row: usize) -> bool {
+        let Some(l) = self.lines.get(row) else { return false };
+        let name = crate::plan::split_link(&l.text).0.trim().trim_end_matches('/');
+        self.git.get(name).is_some_and(|g| g.letter != '!')
     }
 
     pub fn undo(&mut self) -> bool {
@@ -219,6 +262,12 @@ impl Buffer {
         }
         let max = self.lines.len().saturating_sub(h);
         self.scroll = self.scroll.min(max.max(0)).min(self.row);
+    }
+
+    /// Entry the current line came from, even while it is being renamed
+    /// (for the preview and `gy`; opening still wants [`Buffer::cur_entry`]).
+    pub fn cur_source_entry<'a>(&self, store: &'a Store) -> Option<&'a Entry> {
+        store.get(self.cur().id?)
     }
 
     /// Entry of the current line if it is an unmodified, existing entry.
@@ -296,6 +345,8 @@ mod tests {
             hscroll: 0,
             view_h: 10,
             git: HashMap::new(),
+            branch: None,
+            only_changed: false,
             error: None,
             undo: vec![],
             redo: vec![],

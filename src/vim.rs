@@ -15,6 +15,8 @@ pub enum FinderKind {
     Recent,
     /// Changed / untracked files (`git status`), previewed as diffs.
     Git,
+    /// Triage: git changes, pending edits, marked and recent files together.
+    Dash,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +72,20 @@ pub enum Action {
     /// Move (`copy: false`) or copy the yanked/cut lines to a folder picked
     /// with the fuzzy finder.
     Transfer { copy: bool },
+    /// `:stage` / `:unstage` / `:restore` on these entries.
+    Git { op: String, ids: Vec<u64> },
+    /// `:extract` archives into a new folder next to them.
+    Extract(Vec<u64>),
+    /// `:zip name.zip` / `:tar name.tar.gz` the entries.
+    Archive { name: String, tar: bool, ids: Vec<u64> },
+    /// `gD`: the structured diff of the cursor entry (a folder: all changes under it).
+    DiffView,
+    /// `gl`: recent commits touching the cursor entry.
+    Log,
+    /// `gG`: show only entries with a git status.
+    GitFilter,
+    /// `gw`: parent-folder column.
+    ToggleParent,
 }
 
 /// What `gy` / `gY` / `gn` copy.
@@ -99,7 +115,19 @@ pub struct Vim {
     last_visual: Option<(usize, usize)>,
     /// Lines before a live `:s` preview was drawn over them.
     sub_base: Option<Vec<Line>>,
+    /// Past `:` commands and `/` searches (oldest first), and where they persist.
+    hist_cmd: Vec<String>,
+    hist_search: Vec<String>,
+    pub hist_file: Option<std::path::PathBuf>,
+    /// `Up` / `Down` browsing: current history index and the typed prefix.
+    hist_nav: Option<(usize, String)>,
+    /// Rows a live `:g/pat/d` preview would delete (drawn struck through).
+    pub doomed: Vec<usize>,
+    /// User recipes from the config: name → range commands run in order.
+    pub recipes: Vec<(String, Vec<String>)>,
 }
+
+const HISTORY_MAX: usize = 200;
 
 fn cls(c: char, big: bool) -> u8 {
     if c.is_whitespace() {
@@ -249,6 +277,12 @@ impl Default for Vim {
             cmd_keys: vec![],
             last_visual: None,
             sub_base: None,
+            hist_cmd: vec![],
+            hist_search: vec![],
+            hist_file: None,
+            hist_nav: None,
+            doomed: vec![],
+            recipes: vec![],
         }
     }
 }
@@ -369,10 +403,72 @@ impl Vim {
 
     // ── command line (: and /) ──────────────────────────────────────────────
 
+    /// Read `:` / `/` history saved by earlier sessions (one `:cmd` or `/pat` per line).
+    pub fn load_history(&mut self, file: std::path::PathBuf) {
+        for l in std::fs::read_to_string(&file).unwrap_or_default().lines() {
+            match l.split_at_checked(1) {
+                Some((":", t)) if !t.is_empty() => self.hist_cmd.push(t.to_string()),
+                Some(("/", t)) if !t.is_empty() => self.hist_search.push(t.to_string()),
+                _ => {}
+            }
+        }
+        self.hist_file = Some(file);
+    }
+
+    fn remember(&mut self, kind: char, text: &str) {
+        let list = if kind == ':' { &mut self.hist_cmd } else { &mut self.hist_search };
+        list.retain(|x| x != text);
+        list.push(text.to_string());
+        if list.len() > HISTORY_MAX {
+            list.drain(..list.len() - HISTORY_MAX);
+        }
+        if let Some(f) = &self.hist_file {
+            let body: String = self.hist_cmd.iter().map(|t| format!(":{t}\n")).chain(self.hist_search.iter().map(|t| format!("/{t}\n"))).collect();
+            if let Some(d) = f.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(f, body);
+        }
+    }
+
+    /// Step to an older (or newer) history entry starting with what was typed.
+    fn recall(&mut self, kind: char, text: &mut String, older: bool) {
+        let list = if kind == ':' { &self.hist_cmd } else { &self.hist_search };
+        let (at, prefix) = self.hist_nav.take().unwrap_or_else(|| (list.len(), text.clone()));
+        let found = if older {
+            (0..at).rev().find(|&i| list[i].starts_with(&prefix))
+        } else {
+            (at + 1..list.len()).find(|&i| list[i].starts_with(&prefix))
+        };
+        match found {
+            Some(i) => {
+                *text = list[i].clone();
+                self.hist_nav = Some((i, prefix));
+            }
+            // past the newest: back to what was typed
+            None if !older => *text = prefix,
+            None => self.hist_nav = Some((at, prefix)),
+        }
+    }
+
     fn cmd_key(&mut self, b: &mut Buffer, k: KeyEvent) -> Action {
         let Mode::Cmd { kind, mut text, mut cur, origin } = self.mode.clone() else { return Action::None };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let browse = match k.code {
+            KeyCode::Up => Some(true),
+            KeyCode::Down => Some(false),
+            KeyCode::Char('p') if ctrl => Some(true),
+            KeyCode::Char('n') if ctrl => Some(false),
+            _ => None,
+        };
+        if browse.is_none() {
+            self.hist_nav = None;
+        }
         match k.code {
+            _ if browse.is_some() => {
+                self.recall(kind, &mut text, browse == Some(true));
+                cur = text.chars().count();
+            }
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.unpreview(b);
@@ -384,6 +480,9 @@ impl Vim {
             KeyCode::Enter => {
                 self.mode = Mode::Normal;
                 self.unpreview(b);
+                if !text.trim().is_empty() {
+                    self.remember(kind, if kind == '/' { &text } else { text.trim() });
+                }
                 if kind == '/' {
                     if !text.is_empty() {
                         self.search = text;
@@ -395,30 +494,14 @@ impl Vim {
             KeyCode::Tab if kind == ':' => {
                 (text, cur) = self.complete(b, &text, cur);
             }
-            KeyCode::Backspace => {
-                if text.is_empty() {
-                    self.mode = Mode::Normal;
-                    self.unpreview(b);
-                    return Action::None;
-                }
-                if cur > 0 {
-                    let bi = crate::buffer::byte_at(&text, cur - 1);
-                    text.remove(bi);
-                    cur -= 1;
-                }
+            KeyCode::Backspace if text.is_empty() => {
+                self.mode = Mode::Normal;
+                self.unpreview(b);
+                return Action::None;
             }
-            KeyCode::Char('u') if ctrl => {
-                text.clear();
-                cur = 0;
+            _ => {
+                crate::input::edit(&mut text, &mut cur, k);
             }
-            KeyCode::Left => cur = cur.saturating_sub(1),
-            KeyCode::Right => cur = (cur + 1).min(text.chars().count()),
-            KeyCode::Char(c) if !ctrl => {
-                let bi = crate::buffer::byte_at(&text, cur);
-                text.insert(bi, c);
-                cur += 1;
-            }
-            _ => {}
         }
         if kind == '/' {
             if let Some(r) = search_from(b, &text, origin.0, true, false) {
@@ -437,18 +520,54 @@ impl Vim {
 
     /// Put back the lines a live `:s` preview drew over.
     fn unpreview(&mut self, b: &mut Buffer) {
+        self.doomed.clear();
         if let Some(base) = self.sub_base.take() {
             b.lines = base;
             b.clamp();
         }
     }
 
-    /// Show what a `:s/pat/rep/` being typed would do, without committing it.
+    /// The lines a live `:s` preview is drawn over (to highlight what changed).
+    pub fn preview_base(&self) -> Option<&[Line]> {
+        self.sub_base.as_deref()
+    }
+
+    /// Show what a `:s/pat/rep/` or `:g/pat/cmd` being typed would do,
+    /// without committing it. `:g/…/d` only marks the doomed lines.
     fn live_substitute(&mut self, b: &mut Buffer, text: &str) {
         if let Some(base) = &self.sub_base {
             b.lines = base.clone();
         }
+        self.doomed.clear();
         let (range, rest) = parse_range(text.trim_start(), b, self.last_visual);
+        if let Some(g) = parse_global(rest) {
+            let g = match g {
+                Ok(g) => g,
+                Err(e) => {
+                    self.unpreview(b);
+                    self.msg = Some(e);
+                    return;
+                }
+            };
+            let (lo, hi) = range.unwrap_or((0, b.lines.len() - 1));
+            let rows = g.rows(&b.lines, lo, hi);
+            match &g.cmd {
+                GCmd::Delete => {
+                    self.unpreview(b);
+                    self.msg = Some(if rows.is_empty() { "no match".into() } else { format!("{} line{} to delete", rows.len(), plural(rows.len())) });
+                    self.doomed = rows;
+                }
+                GCmd::Sub(sub) => {
+                    if self.sub_base.is_none() {
+                        self.sub_base = Some(b.lines.clone());
+                    }
+                    let (n, _) = substitute_rows(&mut b.lines, &rows, sub);
+                    self.msg = Some(if n == 0 { "no match".into() } else { format!("{n} match{} on {} line{}", if n == 1 { "" } else { "es" }, rows.len(), plural(rows.len())) });
+                }
+            }
+            b.clamp();
+            return;
+        }
         let Some(sub) = parse_sub(rest) else {
             self.unpreview(b);
             return;
@@ -457,7 +576,7 @@ impl Vim {
             self.sub_base = Some(b.lines.clone());
         }
         let (lo, hi) = range.unwrap_or((b.row, b.row));
-        match sub.and_then(|s| substitute(&mut b.lines, lo, hi, &s)) {
+        match sub.map(|s| substitute(&mut b.lines, lo, hi, &s)) {
             Ok((n, _)) if n > 0 => self.msg = Some(format!("{n} match{}", if n == 1 { "" } else { "es" })),
             Ok(_) => self.msg = Some("no match".into()),
             Err(e) => self.msg = Some(e),
@@ -471,10 +590,42 @@ impl Vim {
         if cur != text.chars().count() {
             return unchanged;
         }
-        let Some((head, arg)) = text.split_once(' ') else {
-            let cands: Vec<String> = EX_COMMANDS.iter().filter(|c| c.starts_with(text)).map(|c| c.to_string()).collect();
-            return self.fill(text, "", &cands).map(|t| { let n = t.chars().count(); (t, n) }).unwrap_or(unchanged);
+        // a leading range stays as typed (`%recipe ke⇥`)
+        let (_, rest) = parse_range(text, b, self.last_visual);
+        let lead = &text[..text.len() - rest.len()];
+        let done = |t: String| {
+            let n = t.chars().count();
+            (t, n)
         };
+        // `s/partial` → names in this listing (as listed, not as previewed)
+        let lines = self.sub_base.as_deref().unwrap_or(&b.lines);
+        if let Some(partial) = rest.strip_prefix("s/").filter(|p| !p.contains('/')) {
+            let mut cands: Vec<String> = lines.iter().filter(|l| l.significant()).map(|l| crate::plan::split_link(&l.text).0.to_string()).filter(|n| n.starts_with(partial)).collect();
+            cands.dedup();
+            return self.fill(partial, &format!("{lead}s/"), &cands).map(done).unwrap_or(unchanged);
+        }
+        let Some((head, arg)) = rest.split_once(' ') else {
+            let cands: Vec<String> = EX_COMMANDS.iter().filter(|c| c.starts_with(rest)).map(|c| c.to_string()).collect();
+            return self.fill(rest, lead, &cands).map(|t| if lead.is_empty() { t } else { t.trim_end().to_string() + if cands.len() == 1 { " " } else { "" } }).map(done).unwrap_or(unchanged);
+        };
+        let words: Option<Vec<String>> = match head {
+            "sort" => Some(["name", "mtime", "size", "ext"].iter().map(|s| s.to_string()).collect()),
+            "chmod" => Some(["+x", "-x", "u+x", "go-w", "644", "755", "600", "700"].iter().map(|s| s.to_string()).collect()),
+            "recipe" => Some(RECIPES.iter().map(|(n, _)| n.to_string()).chain(self.recipes.iter().map(|(n, _)| n.clone())).collect()),
+            "touch" | "mkdir" => Some(lines.iter().filter(|l| l.significant()).map(|l| crate::plan::split_link(&l.text).0.to_string()).collect()),
+            _ => None,
+        };
+        if let Some(words) = words {
+            // complete the last word of the argument
+            let (before, partial) = match arg.rfind(' ') {
+                Some(i) => (&arg[..=i], &arg[i + 1..]),
+                None => ("", arg),
+            };
+            let mut cands: Vec<String> = words.into_iter().filter(|w| w.starts_with(partial)).collect();
+            cands.sort_by(|a, b| crate::entry::natural_cmp(a, b));
+            cands.dedup();
+            return self.fill(partial, &format!("{lead}{head} {before}"), &cands).map(done).unwrap_or(unchanged);
+        }
         if !matches!(head, "cd" | "e" | "edit") {
             return unchanged;
         }
@@ -540,7 +691,9 @@ impl Vim {
 
     fn ex(&mut self, b: &mut Buffer, cmd: &str) -> Action {
         let (range, rest) = parse_range(cmd, b, self.last_visual);
-        if range.is_some() || parse_sub(rest).is_some() || ["prefix ", "suffix ", "chmod "].iter().any(|p| rest.starts_with(p)) {
+        let word = rest.split_once(' ').map(|(w, _)| w).unwrap_or(rest);
+        let with_arg = rest.contains(' ') && ["prefix", "suffix", "chmod", "recipe", "zip", "tar"].contains(&word);
+        if range.is_some() || with_arg || rest == "recipe" || parse_sub(rest).is_some() || parse_global(rest).is_some() {
             if let Some(a) = self.ex_range(b, range, rest) {
                 return a;
             }
@@ -564,6 +717,17 @@ impl Vim {
             "preview" => Action::TogglePreview,
             "files" => Action::Finder(FinderKind::Files),
             "grep" | "rg" => Action::Finder(FinderKind::Grep),
+            "dash" | "dashboard" => Action::Finder(FinderKind::Dash),
+            "noh" | "nohlsearch" => {
+                self.search.clear();
+                Action::None
+            }
+            "stage" | "unstage" | "restore" => Action::Git { op: cmd.to_string(), ids: b.cur().id.into_iter().collect() },
+            "extract" => Action::Extract(b.cur().id.into_iter().collect()),
+            "diff" => Action::DiffView,
+            "log" => Action::Log,
+            "git-filter" | "changed" => Action::GitFilter,
+            "parent" => Action::ToggleParent,
             _ => {
                 if let Ok(n) = cmd.parse::<usize>() {
                     b.row = n.saturating_sub(1).min(b.lines.len() - 1);
@@ -590,10 +754,54 @@ impl Vim {
     }
 
     /// Ex commands that work on a line range (`%`, `'<,'>`, `n,m`, default
-    /// the cursor line): `s/pat/rep/[gi]`, `prefix`, `suffix`, `chmod`.
+    /// the cursor line; `:g` / `:v` default to the whole buffer):
+    /// `s/pat/rep/[gi]`, `g/pat/cmd`, `v/pat/cmd`, `prefix`, `suffix`,
+    /// `recipe`, `chmod`, `send`, `stage` / `unstage` / `restore`,
+    /// `extract`, `zip` / `tar`.
     fn ex_range(&mut self, b: &mut Buffer, range: Option<(usize, usize)>, rest: &str) -> Option<Action> {
         let (lo, hi) = range.unwrap_or((b.row, b.row));
         let hi = hi.min(b.lines.len() - 1);
+        if let Some(g) = parse_global(rest) {
+            let g = match g {
+                Ok(g) => g,
+                Err(e) => {
+                    self.msg = Some(e);
+                    return Some(Action::None);
+                }
+            };
+            let (lo, hi) = range.unwrap_or((0, b.lines.len() - 1));
+            let rows = g.rows(&b.lines, lo, hi);
+            if rows.is_empty() {
+                self.msg = Some(format!("pattern not found: {}", g.pat));
+                return Some(Action::None);
+            }
+            b.snapshot();
+            match &g.cmd {
+                GCmd::Delete => {
+                    let mut cut = Vec::new();
+                    for &r in rows.iter().rev() {
+                        cut.push(b.lines.remove(r));
+                    }
+                    cut.reverse();
+                    let n = cut.len();
+                    self.set_lines(cut, true);
+                    b.ensure_nonempty();
+                    b.row = rows[0].min(b.lines.len() - 1);
+                    self.msg = Some(format!("{n} line{} cut — :w deletes {} (p pastes = moves)", plural(n), if n == 1 { "it" } else { "them" }));
+                }
+                GCmd::Sub(sub) => {
+                    let (n, l) = substitute_rows(&mut b.lines, &rows, sub);
+                    if n == 0 {
+                        b.squash_noop();
+                        self.msg = Some(format!("pattern not found: {}", sub.pat));
+                    } else {
+                        self.msg = Some(format!("{n} substitution{} on {l} line{} — :w to rename", plural(n), plural(l)));
+                    }
+                }
+            }
+            b.clamp();
+            return Some(Action::None);
+        }
         if let Some(sub) = parse_sub(rest) {
             let sub = match sub {
                 Ok(s) => s,
@@ -602,40 +810,41 @@ impl Vim {
                     return Some(Action::None);
                 }
             };
-            let before = b.lines.clone();
             b.snapshot();
             match substitute(&mut b.lines, lo, hi, &sub) {
-                Ok((0, _)) => {
+                (0, _) => {
                     b.squash_noop();
                     self.msg = Some(format!("pattern not found: {}", sub.pat));
                 }
-                Ok((n, l)) => self.msg = Some(format!("{n} substitution{} on {l} line{} — :w to rename", if n == 1 { "" } else { "s" }, if l == 1 { "" } else { "s" })),
-                Err(e) => {
-                    b.lines = before;
-                    b.squash_noop();
-                    self.msg = Some(e);
-                }
+                (n, l) => self.msg = Some(format!("{n} substitution{} on {l} line{} — :w to rename", plural(n), plural(l))),
             }
             b.clamp();
             return Some(Action::None);
         }
         let (word, arg) = rest.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((rest, ""));
+        let ids = || -> Vec<u64> { b.lines[lo..=hi].iter().filter_map(|l| l.id).collect() };
         match word {
             "prefix" | "suffix" if !arg.is_empty() => {
                 b.snapshot();
+                let pieces = counter_pieces(arg);
                 let mut n = 0;
                 for l in b.lines[lo..=hi].iter_mut().filter(|l| l.significant()) {
-                    l.text = if word == "prefix" { format!("{arg}{}", l.text) } else { with_suffix(&l.text, arg) };
+                    let arg = render_pieces(&pieces, n, None);
+                    l.text = if word == "prefix" { with_prefix(&l.text, &arg) } else { with_suffix(&l.text, &arg) };
                     n += 1;
                 }
-                self.msg = Some(format!("{word}ed {n} name{} — :w to rename", if n == 1 { "" } else { "s" }));
+                self.msg = Some(format!("{word}ed {n} name{} — :w to rename", plural(n)));
                 Some(Action::None)
             }
-            "send" => Some(Action::Send(b.lines[lo..=hi].iter().filter_map(|l| l.id).collect())),
-            "chmod" if !arg.is_empty() => {
-                let ids: Vec<u64> = b.lines[lo..=hi].iter().filter_map(|l| l.id).collect();
-                Some(Action::Chmod { spec: arg.to_string(), ids })
+            "recipe" => {
+                self.recipe(b, lo, hi, arg);
+                Some(Action::None)
             }
+            "send" => Some(Action::Send(ids())),
+            "chmod" if !arg.is_empty() => Some(Action::Chmod { spec: arg.to_string(), ids: ids() }),
+            "stage" | "unstage" | "restore" => Some(Action::Git { op: word.to_string(), ids: ids() }),
+            "extract" => Some(Action::Extract(ids())),
+            "zip" | "tar" if !arg.is_empty() => Some(Action::Archive { name: arg.to_string(), tar: word == "tar", ids: ids() }),
             "" => {
                 b.row = lo;
                 Some(Action::None)
@@ -646,6 +855,46 @@ impl Vim {
             }
             _ => None,
         }
+    }
+
+    /// `:recipe NAME`: a built-in name transform (see [`RECIPES`]) or a user
+    /// recipe from the config (a list of range commands), as one undo step.
+    fn recipe(&mut self, b: &mut Buffer, lo: usize, hi: usize, name: &str) {
+        if name.is_empty() {
+            let mut all: Vec<&str> = RECIPES.iter().map(|(n, _)| *n).collect();
+            all.extend(self.recipes.iter().map(|(n, _)| n.as_str()));
+            self.msg = Some(format!("recipes: {}", all.join(" ")));
+            return;
+        }
+        if let Some((_, steps)) = self.recipes.iter().find(|(n, _)| n == name).cloned() {
+            let depth = b.undo_len();
+            for step in &steps {
+                let step = step.trim();
+                // a bare built-in name is a recipe step of its own
+                let step = if RECIPES.iter().any(|(n, _)| *n == step) { format!("recipe {step}") } else { step.to_string() };
+                self.ex_range(b, Some((lo, hi)), &step);
+            }
+            b.squash_to(depth);
+            self.msg = Some(format!("recipe {name}: {} step{} — :w to rename", steps.len(), plural(steps.len())));
+            return;
+        }
+        if !RECIPES.iter().any(|(n, _)| *n == name) {
+            self.msg = Some(format!("no recipe {name} — :recipe lists them"));
+            return;
+        }
+        b.snapshot();
+        let mut n = 0;
+        for l in b.lines[lo..=hi].iter_mut().filter(|l| l.significant()) {
+            let new = apply_recipe(name, &l.text);
+            if new != l.text {
+                l.text = new;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            b.squash_noop();
+        }
+        self.msg = Some(format!("{name}: {n} name{} changed — :w to rename", plural(n)));
     }
 
     // ── visual line ─────────────────────────────────────────────────────────
@@ -901,6 +1150,10 @@ impl Vim {
                     }
                     'f' => *act = Action::Finder(FinderKind::Files),
                     '/' => *act = Action::Finder(FinderKind::Grep),
+                    'D' => *act = Action::DiffView,
+                    'l' => *act = Action::Log,
+                    'G' => *act = Action::GitFilter,
+                    'w' => *act = Action::ToggleParent,
                     _ => return Parse::Bad,
                 }
                 Parse::Done
@@ -915,6 +1168,24 @@ impl Vim {
                     's' => Action::Finder(FinderKind::Git),
                     _ => return Parse::Bad,
                 };
+                Parse::Done
+            }
+            ']' | '[' => {
+                let Some(&d) = keys.get(i) else { return Parse::More };
+                if !matches!(d, 'g' | 'c') {
+                    return Parse::Bad;
+                }
+                // next / previous entry with a git status, wrapping around
+                let len = b.lines.len();
+                let fwd = c == ']';
+                let hit = (1..len).map(|k| if fwd { (b.row + k) % len } else { (b.row + len - k) % len }).find(|&r| b.git_dirty(r));
+                match hit {
+                    Some(r) => {
+                        b.row = r;
+                        b.col = 0;
+                    }
+                    None => self.msg = Some("no other changed entries here".into()),
+                }
                 Parse::Done
             }
             'Z' => {
@@ -1311,15 +1582,154 @@ impl Vim {
 
 /// Ex command names offered by `<Tab>` completion.
 const EX_COMMANDS: &[&str] = &[
-    "cd", "chmod", "details", "edit", "edit-buffer", "files", "grep", "help", "hidden", "marks", "mkdir", "prefix", "preview", "pwd", "quit", "reverse", "send", "sort", "suffix", "touch", "undo-apply", "write",
+    "cd", "changed", "chmod", "dash", "details", "diff", "edit", "edit-buffer", "extract", "files", "grep", "help", "hidden", "history", "log", "marks", "mkdir", "noh", "parent", "plan", "plan-copy", "prefix", "preview", "pwd", "quit", "recipe", "restore", "reverse", "send", "sort", "stage", "suffix", "tar", "touch", "undo-apply", "unstage", "write", "zip",
 ];
 
 /// A parsed `s/pat/rep/flags`.
 pub struct Sub {
     pub pat: String,
     re: regex::Regex,
-    rep: String,
+    rep: Vec<Piece>,
     global: bool,
+}
+
+/// Part of a replacement / prefix / suffix: text (with `$1` groups) or a
+/// counter token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Piece {
+    Text(String),
+    /// `{#}` 1, 2, 3… · `{03#}` zero-padded to 3 · `{#10}` from 10 ·
+    /// `{#10+5}` in steps of 5. `\{` writes a literal brace.
+    Count { width: usize, start: i64, step: i64 },
+}
+
+fn counter_pieces(s: &str) -> Vec<Piece> {
+    static TOKEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = TOKEN.get_or_init(|| regex::Regex::new(r"^\{(\d*)#(-?\d*)(?:\+(\d+))?\}").unwrap());
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        if rest.starts_with("\\{") {
+            text.push('{');
+            i += 2;
+            continue;
+        }
+        if let Some(c) = re.captures(rest) {
+            if !text.is_empty() {
+                out.push(Piece::Text(std::mem::take(&mut text)));
+            }
+            let num = |k: usize, d: i64| c.get(k).and_then(|m| m.as_str().parse().ok()).unwrap_or(d);
+            out.push(Piece::Count { width: num(1, 0) as usize, start: num(2, 1), step: num(3, 1) });
+            i += c[0].len();
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        text.push(ch);
+        i += ch.len_utf8();
+    }
+    if !text.is_empty() || out.is_empty() {
+        out.push(Piece::Text(text));
+    }
+    out
+}
+
+/// The `n`-th (0-based) rendering: counters filled in, `$1` groups
+/// expanded from `caps` when given.
+fn render_pieces(pieces: &[Piece], n: usize, caps: Option<&regex::Captures>) -> String {
+    let mut out = String::new();
+    for p in pieces {
+        match p {
+            Piece::Text(t) => match caps {
+                Some(c) => c.expand(t, &mut out),
+                None => out.push_str(t),
+            },
+            Piece::Count { width, start, step } => {
+                let v = start + step * n as i64;
+                out.push_str(&format!("{v:0width$}", width = *width));
+            }
+        }
+    }
+    out
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// `:g/pat/cmd` (`:v` or `:g!` for non-matching lines).
+pub struct Global {
+    pub pat: String,
+    re: regex::Regex,
+    invert: bool,
+    pub cmd: GCmd,
+}
+
+pub enum GCmd {
+    Delete,
+    Sub(Sub),
+}
+
+impl Global {
+    /// Significant lines in lo..=hi the command applies to.
+    fn rows(&self, lines: &[Line], lo: usize, hi: usize) -> Vec<usize> {
+        let hi = hi.min(lines.len().saturating_sub(1));
+        (lo..=hi).filter(|&i| lines[i].significant() && self.re.is_match(&lines[i].text) != self.invert).collect()
+    }
+}
+
+/// `g/pat/d`, `g/pat/s/a/b/`, `v/pat/d`, `g!/pat/d`. `None` when the text
+/// is not a global command, `Some(Err)` when it is malformed.
+fn parse_global(cmd: &str) -> Option<Result<Global, String>> {
+    let (invert, rest) = if let Some(r) = cmd.strip_prefix("g!") {
+        (true, r)
+    } else if let Some(r) = cmd.strip_prefix('g') {
+        (false, r)
+    } else {
+        (true, cmd.strip_prefix('v')?)
+    };
+    let delim = rest.chars().next().filter(|c| !c.is_alphanumeric() && !c.is_whitespace() && *c != '\\' && *c != '!')?;
+    let mut pat = String::new();
+    let mut tail = None;
+    let mut esc = false;
+    for (i, c) in rest[delim.len_utf8()..].char_indices() {
+        if esc {
+            if c != delim {
+                pat.push('\\');
+            }
+            pat.push(c);
+            esc = false;
+        } else if c == '\\' {
+            esc = true;
+        } else if c == delim {
+            tail = Some(&rest[delim.len_utf8() + i + c.len_utf8()..]);
+            break;
+        } else {
+            pat.push(c);
+        }
+    }
+    if pat.is_empty() {
+        return Some(Err("empty pattern".into()));
+    }
+    let re = match regex::Regex::new(&pat) {
+        Ok(r) => r,
+        Err(_) => return Some(Err(format!("bad pattern: {pat}"))),
+    };
+    let cmd = match tail.map(str::trim) {
+        Some("d") => GCmd::Delete,
+        Some(t) if t.starts_with('s') => match parse_sub(t) {
+            Some(Ok(s)) => GCmd::Sub(s),
+            Some(Err(e)) => return Some(Err(e)),
+            None => return Some(Err(format!("{t}: not a substitution"))),
+        },
+        _ => return Some(Err("g/pat/ needs a command: d or s/…/…/".into())),
+    };
+    Some(Ok(Global { pat, re, invert, cmd }))
 }
 
 /// Split a leading line range off an ex command: `%`, `'<,'>`, `n,m`, `.`.
@@ -1401,26 +1811,39 @@ fn parse_sub(cmd: &str) -> Option<Result<Sub, String>> {
             _ => rep.push(c),
         }
     }
-    Some(Ok(Sub { pat, re, rep, global: flags.contains('g') }))
+    Some(Ok(Sub { pat, re, rep: counter_pieces(&rep), global: flags.contains('g') }))
 }
 
 /// Apply `sub` to lines lo..=hi; returns (substitutions, lines changed).
-fn substitute(lines: &mut [Line], lo: usize, hi: usize, sub: &Sub) -> Result<(usize, usize), String> {
-    let (mut n, mut changed) = (0, 0);
+fn substitute(lines: &mut [Line], lo: usize, hi: usize, sub: &Sub) -> (usize, usize) {
     let hi = hi.min(lines.len().saturating_sub(1));
-    for l in lines[lo..=hi].iter_mut().filter(|l| l.significant()) {
-        let hits = sub.re.find_iter(&l.text).count();
-        if hits == 0 {
+    let rows: Vec<usize> = (lo..=hi).collect();
+    substitute_rows(lines, &rows, sub)
+}
+
+/// Apply `sub` to the given rows; a `{#}` counter runs on across them.
+fn substitute_rows(lines: &mut [Line], rows: &[usize], sub: &Sub) -> (usize, usize) {
+    let (mut n, mut changed) = (0, 0);
+    for &r in rows {
+        let Some(l) = lines.get_mut(r).filter(|l| l.significant()) else { continue };
+        if !sub.re.is_match(&l.text) {
             continue;
         }
-        let new = if sub.global { sub.re.replace_all(&l.text, sub.rep.as_str()) } else { sub.re.replace(&l.text, sub.rep.as_str()) };
-        n += if sub.global { hits } else { 1 };
+        let mut k = n;
+        let mut each = |c: &regex::Captures| {
+            let s = render_pieces(&sub.rep, k, Some(c));
+            k += 1;
+            s
+        };
+        let new = if sub.global { sub.re.replace_all(&l.text, &mut each) } else { sub.re.replace(&l.text, &mut each) };
+        let new = new.into_owned();
+        n = k;
         if new != l.text {
             changed += 1;
-            l.text = new.into_owned();
+            l.text = new;
         }
     }
-    Ok((n, changed))
+    (n, changed)
 }
 
 /// Append to a name's stem: `report.md` + `-v2` → `report-v2.md`, `dir/` → `dir-v2/`.
@@ -1438,6 +1861,116 @@ fn with_suffix(text: &str, suf: &str) -> String {
         (v[..d].iter().collect(), v[d..].iter().collect())
     };
     format!("{stem}{suf}{ext}{}", if slash { "/" } else { "" })
+}
+
+fn with_prefix(text: &str, pre: &str) -> String {
+    format!("{pre}{text}")
+}
+
+/// Built-in `:recipe` transforms (applied to the name, keeping the
+/// extension unless noted).
+pub const RECIPES: &[(&str, &str)] = &[
+    ("lower", "lower-case the whole name"),
+    ("upper", "upper-case the stem"),
+    ("kebab", "my File (1).PDF → my-file-1.pdf"),
+    ("snake", "my File (1).PDF → my_file_1.pdf"),
+    ("slugify", "kebab, plus äöüß/accents → ascii"),
+    ("title", "my file name.md → My File Name.md"),
+    ("clean", "collapse runs of spaces, trim"),
+    ("screenshots", "Screenshot 2024-05-01 at 10.11.12.png → screenshot-2024-05-01-101112.png"),
+];
+
+/// Split a line into (name stem, extension incl. dot, trailing `/`, ` -> target`).
+fn name_parts(text: &str) -> (String, String, &'static str, String) {
+    let (name, link) = crate::plan::split_link(text);
+    let link = link.map(|t| format!(" -> {t}")).unwrap_or_default();
+    let dir = name.ends_with('/');
+    let core = name.trim_end_matches('/');
+    let v: Vec<char> = core.chars().collect();
+    let (stem, ext) = if dir {
+        (core.to_string(), String::new())
+    } else {
+        let (_, d) = name_object(&v, false);
+        (v[..d].iter().collect(), v[d..].iter().collect())
+    };
+    (stem, ext, if dir { "/" } else { "" }, link)
+}
+
+fn ascii_fold(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            'ä' => out.push_str("ae"),
+            'ö' => out.push_str("oe"),
+            'ü' => out.push_str("ue"),
+            'Ä' => out.push_str("Ae"),
+            'Ö' => out.push_str("Oe"),
+            'Ü' => out.push_str("Ue"),
+            'ß' => out.push_str("ss"),
+            'à' | 'á' | 'â' | 'ã' | 'å' => out.push('a'),
+            'è' | 'é' | 'ê' | 'ë' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' => out.push('i'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ø' => out.push('o'),
+            'ù' | 'ú' | 'û' => out.push('u'),
+            'ç' => out.push('c'),
+            'ñ' => out.push('n'),
+            'À' | 'Á' | 'Â' | 'Ã' | 'Å' => out.push('A'),
+            'È' | 'É' | 'Ê' | 'Ë' => out.push('E'),
+            'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ø' => out.push('O'),
+            'Ù' | 'Ú' | 'Û' => out.push('U'),
+            'Ç' => out.push('C'),
+            'Ñ' => out.push('N'),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Lower-case words of `s` joined by `sep` (anything not alphanumeric splits).
+fn joined(s: &str, sep: char) -> String {
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>().join(&sep.to_string())
+}
+
+fn apply_recipe(name: &str, text: &str) -> String {
+    let (stem, ext, slash, link) = name_parts(text);
+    if stem.is_empty() {
+        return text.to_string();
+    }
+    let stem = match name {
+        "lower" => return format!("{}{}{slash}{link}", stem.to_lowercase(), ext.to_lowercase()),
+        "upper" => stem.to_uppercase(),
+        "kebab" => joined(&stem, '-'),
+        "snake" => joined(&stem, '_'),
+        "slugify" => joined(&ascii_fold(&stem), '-'),
+        "title" => stem
+            .split(' ')
+            .map(|w| {
+                let mut c = w.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        "clean" => stem.split_whitespace().collect::<Vec<_>>().join(" "),
+        "screenshots" => {
+            static SHOT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            let re = SHOT.get_or_init(|| {
+                regex::Regex::new(r"^(?i:screen ?shot|bildschirmfoto|capture d.écran|schermafbeelding)\D*(\d{4}-\d{2}-\d{2})\D+(\d{1,2})[.:](\d{2})[.:](\d{2})(?:\s*([AP]M))?(.*)$").unwrap()
+            });
+            let Some(c) = re.captures(&stem) else { return text.to_string() };
+            let mut h: u32 = c[2].parse().unwrap_or(0);
+            match c.get(5).map(|m| m.as_str()) {
+                Some("PM") if h < 12 => h += 12,
+                Some("AM") if h == 12 => h = 0,
+                _ => {}
+            }
+            let extra = joined(&c[6], '-');
+            let extra = if extra.is_empty() { extra } else { format!("-{extra}") };
+            format!("screenshot-{}-{h:02}{}{}{extra}", &c[1], &c[3], &c[4])
+        }
+        _ => return text.to_string(),
+    };
+    let ext = if matches!(name, "kebab" | "snake" | "slugify" | "screenshots") { ext.to_lowercase() } else { ext };
+    format!("{stem}{ext}{slash}{link}")
 }
 
 fn take_count(keys: &[char], i: &mut usize) -> Option<usize> {
@@ -1713,5 +2246,121 @@ mod tests {
         let mut v = Vim::default();
         keys(&mut v, &mut b, "cinlive\x1b");
         assert_eq!(b.lines[0].text, "live.toml -> config.dev.toml");
+    }
+
+    #[test]
+    fn counter_tokens() {
+        let mut b = buf(&[(Some(1), "IMG_7.jpg"), (Some(2), "IMG_9.jpg"), (Some(3), "notes.txt"), (Some(4), "IMG_12.jpg")]);
+        let mut v = Vim::default();
+        keys(&mut v, &mut b, ":%s/IMG_\\d+/photo_{03#}/\n");
+        assert_eq!(texts(&b), ["photo_001.jpg", "photo_002.jpg", "notes.txt", "photo_003.jpg"]);
+        keys(&mut v, &mut b, "u:%s/^/{#10+5}-/\n");
+        assert_eq!(texts(&b), ["10-IMG_7.jpg", "15-IMG_9.jpg", "20-notes.txt", "25-IMG_12.jpg"]);
+        // a literal brace, and groups next to a counter
+        keys(&mut v, &mut b, "u:1s/IMG_(\\d+)/$1{#}\\{x}/\n");
+        assert_eq!(texts(&b)[0], "71{x}.jpg");
+        keys(&mut v, &mut b, "u:2,3prefix {02#}_\n");
+        assert_eq!(texts(&b)[1..3], ["01_IMG_9.jpg", "02_notes.txt"]);
+    }
+
+    #[test]
+    fn global_commands() {
+        let mut b = buf(&[(Some(1), "a.bak"), (Some(2), "keep.txt"), (Some(3), "b.bak"), (Some(4), ".DS_Store")]);
+        let mut v = Vim::default();
+        // the preview only marks the doomed lines
+        keys(&mut v, &mut b, ":g/\\.bak$/d");
+        assert_eq!(v.doomed, vec![0, 2]);
+        assert_eq!(b.lines.len(), 4);
+        keys(&mut v, &mut b, "\n");
+        assert!(v.doomed.is_empty());
+        assert_eq!(texts(&b), ["keep.txt", ".DS_Store"]);
+        assert_eq!(v.reg_entries(), 2, "cut lines can be pasted elsewhere (a move)");
+        keys(&mut v, &mut b, "u:v/txt/d\n");
+        assert_eq!(texts(&b), ["keep.txt"]);
+        keys(&mut v, &mut b, "u:g/bak/s/^/old-{#}-/\n");
+        assert_eq!(texts(&b), ["old-1-a.bak", "keep.txt", "old-2-b.bak", ".DS_Store"]);
+        assert!(keys(&mut v, &mut b, ":g/x/\n").is_empty());
+        assert!(v.msg.as_deref().unwrap_or("").contains("needs a command"));
+    }
+
+    #[test]
+    fn recipes_rename() {
+        assert_eq!(apply_recipe("kebab", "My File (1).PDF"), "my-file-1.pdf");
+        assert_eq!(apply_recipe("snake", "Some Dir/"), "some_dir/");
+        assert_eq!(apply_recipe("slugify", "Über Café.md"), "ueber-cafe.md");
+        assert_eq!(apply_recipe("title", "my file name.md"), "My File Name.md");
+        assert_eq!(apply_recipe("screenshots", "Screenshot 2024-05-01 at 1.02.03 PM.png"), "screenshot-2024-05-01-130203.png");
+        assert_eq!(apply_recipe("screenshots", "notes.png"), "notes.png");
+        assert_eq!(apply_recipe("lower", "link.TXT -> Target.TXT"), "link.txt -> Target.TXT");
+        let mut b = buf(&[(Some(1), "A B.txt"), (Some(2), "C D.txt")]);
+        let mut v = Vim { recipes: vec![("tidy".into(), vec!["kebab".into(), "prefix {02#}-".into()])], ..Vim::default() };
+        keys(&mut v, &mut b, ":%recipe tidy\n");
+        assert_eq!(texts(&b), ["01-a-b.txt", "02-c-d.txt"]);
+        keys(&mut v, &mut b, "u");
+        assert_eq!(texts(&b), ["A B.txt", "C D.txt"], "a recipe undoes in one step");
+    }
+
+    #[test]
+    fn completes_arguments_and_names() {
+        let mut b = buf(&[(Some(1), "report.md"), (Some(2), "readme.txt")]);
+        let mut v = Vim::default();
+        let tab = |v: &mut Vim, b: &mut Buffer| {
+            v.handle(b, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            match &v.mode {
+                Mode::Cmd { text, .. } => text.clone(),
+                _ => panic!(),
+            }
+        };
+        keys(&mut v, &mut b, ":sort mt");
+        assert_eq!(tab(&mut v, &mut b), "sort mtime");
+        keys(&mut v, &mut b, "\x1b:%s/rep");
+        assert_eq!(tab(&mut v, &mut b), "%s/report.md");
+        keys(&mut v, &mut b, "\x1b:%recipe sl");
+        assert_eq!(tab(&mut v, &mut b), "%recipe slugify");
+    }
+
+    #[test]
+    fn jumps_between_changed_entries() {
+        let mut b = buf(&[(Some(1), "a"), (Some(2), "b/"), (Some(3), "c"), (Some(4), "d")]);
+        b.git.insert("b".into(), crate::entry::Git::from_xy(" M"));
+        b.git.insert("d".into(), crate::entry::Git::from_xy("??"));
+        b.git.insert("c".into(), crate::entry::Git::from_xy("!!"));
+        let mut v = Vim::default();
+        keys(&mut v, &mut b, "]g");
+        assert_eq!(b.row, 1);
+        keys(&mut v, &mut b, "]c");
+        assert_eq!(b.row, 3, "ignored entries are skipped");
+        keys(&mut v, &mut b, "]g");
+        assert_eq!(b.row, 1, "wraps around");
+        keys(&mut v, &mut b, "[g");
+        assert_eq!(b.row, 3);
+        assert_eq!(keys(&mut v, &mut b, "gDglgGgw"), [Action::DiffView, Action::Log, Action::GitFilter, Action::ToggleParent]);
+        assert_eq!(keys(&mut v, &mut b, ":%stage\n"), [Action::Git { op: "stage".into(), ids: vec![1, 2, 3, 4] }]);
+        assert_eq!(keys(&mut v, &mut b, ":2,3zip x.zip\n"), [Action::Archive { name: "x.zip".into(), tar: false, ids: vec![2, 3] }]);
+    }
+
+    #[test]
+    fn history_recalls_by_prefix() {
+        let mut b = buf(&[(Some(1), "a.txt"), (Some(2), "b.txt")]);
+        let mut v = Vim::default();
+        keys(&mut v, &mut b, ":sort mtime\n:%s/a/c/\n:sort size\n");
+        let up = |v: &mut Vim, b: &mut Buffer, code| v.handle(b, KeyEvent::new(code, KeyModifiers::NONE));
+        let text = |v: &Vim| match &v.mode {
+            Mode::Cmd { text, .. } => text.clone(),
+            _ => panic!(),
+        };
+        keys(&mut v, &mut b, ":so");
+        up(&mut v, &mut b, KeyCode::Up);
+        assert_eq!(text(&v), "sort size");
+        up(&mut v, &mut b, KeyCode::Up);
+        assert_eq!(text(&v), "sort mtime");
+        up(&mut v, &mut b, KeyCode::Up);
+        assert_eq!(text(&v), "sort mtime");
+        up(&mut v, &mut b, KeyCode::Down);
+        up(&mut v, &mut b, KeyCode::Down);
+        assert_eq!(text(&v), "so");
+        keys(&mut v, &mut b, "\x1b/b\n/");
+        up(&mut v, &mut b, KeyCode::Up);
+        assert_eq!(text(&v), "b");
     }
 }

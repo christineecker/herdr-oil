@@ -16,19 +16,35 @@ herdr-oil diffs the buffer against the disk, shows the plan, and applies it.
 | `yy` or `dd`, then `gm` / `gc`          | move / copy to a fuzzy-picked folder |
 | `link -> new/target` / `o` + `name -> target` | retarget / create a symlink |
 | `:%s/IMG_(\d+)\.jpeg/photo_$1.jpg/`     | batch rename (live preview while typing) |
+| `:%s/^/{03#}_/` · `:recipe kebab`        | number names 001, 002… · named rename recipes |
+| `:g/\.bak$/d` · `:v/\.md$/d`             | delete lines matching / not matching |
 
 Edits in several directories are kept and applied together. Swaps (`a`↔`b`),
 case-only renames on APFS, "move the child out, delete the parent" and
 "rename a dir while editing inside it" are handled. Nothing is ever
-overwritten; clashes are reported before anything runs.
+overwritten; clashes are reported before anything runs, and flagged on
+the line (`! ✗ already exists`) while you type.
 
-The finder (`⇥` from the explorer, or its own key) has five modes:
+The finder (`⇥` from the explorer, or its own key) has six modes:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
 matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
-opened through herdr-oil), and **Git** (changed and untracked files, previewed
-as `git diff`). Previews use `bat` when installed.
-Folder previews show counts, sizes and the README; archives (`zip`, `tar.*`),
-SQLite schemas and binary plists are listed instead of "binary file".
+opened through herdr-oil), **Git** (changed and untracked files across the
+whole repository; `⏎` opens the diff view, `^a` stages, `alt-d` discards) and
+**Dash** (pending edits, git changes, marked and recent files in one list).
+Previews use `bat` when installed and render off the UI thread. Folder previews
+show counts, sizes and the README; archives (`zip`, `tar.*`), SQLite schemas,
+binary plists and PDFs (`pdfinfo` / `pdftotext`, else `mdls`) are described
+instead of "binary file".
+
+Git is part of the listing: status letters tell staged (green), unstaged
+(yellow) and both (peach) apart, renames show as `R`, the header carries the
+branch with `↑ahead ↓behind`, `]g` / `[g` jump between changed entries, `gG`
+lists only those, and `:stage` / `:unstage` / `:restore` work on ranges. The
+**diff view** (`gD`, `d` in the viewer, `⏎` in the Git tab) is GitHub-style:
+numbered lines, tinted additions and removals with word-level highlights,
+syntax colour, hunk headers, folds that expand (`z` / `Z`), unified or split
+(`s`, automatic from 160 columns), a file pane with `+a −d` stats and viewed
+marks (`v`), and three comparisons (`c`: working tree, staged, unstaged).
 
 While you edit, renamed lines show where they came from (`final.md ← draft.md`),
 and a footer names what the directory will lose on `:w`; the review dialog
@@ -108,17 +124,44 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `gm` `gc` | after a yank (`yy`, `V…y`): move / copy the yanked entries to a folder picked in the finder (`⏎` picks a folder, a file means its folder, `^n` uses the query as a new sub-folder); after a cut (`dd`) only `gm`. Shown in the `g` menu only while something is yanked; the review dialog follows |
 | `g.` `gs` `gS` `gd` `^p` | hidden · sort · reverse sort · sizes/details/off · preview |
 | `gy` `gY` `gn` | copy path relative to the repo (or start dir) · absolute path · file name |
-| `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:sort!` `:e!` | `⇥` completes commands and `:cd` / `:e` paths |
-| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` | finder: files · grep · dirs · recent · git changes |
+| `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:sort!` `:e!` | `⇥` completes commands, `:cd` / `:e` paths, `:sort` / `:chmod` / `:recipe` arguments and listed names after `:s/` and `:touch` |
+| `↑` `↓` `^p` `^n` in `:` / `/` | history, filtered by what is typed; kept across sessions |
+| `^a` `^e` `^w` `^u` `^k` `alt-b` `alt-f` | readline editing, the same in `:`, `/`, the viewer prompt and the finder |
+| `/pat` `:noh` | search; matches stay highlighted until `:noh` |
+| `{#}` `{03#}` `{#10}` `{#0+5}` | counters in `:s` replacements and `:prefix` / `:suffix` (per match, in buffer order); `\{` is a literal brace |
+| `:g/pat/d` `:v/pat/d` `:g/pat/s/a/b/` | act on lines matching (or not) a regex; the lines to delete are struck through while you type |
+| `:recipe NAME` | `kebab` `snake` `slugify` `lower` `upper` `title` `clean` `screenshots`, plus your own from the config |
+| `:w` review dialog | `j` `k` pick an op, `x` drops it, `o` jumps to its line; clashes on `:w` offer `c` (number them: `report 2.pdf`) and `o` |
+| `:history` | applied batches (kept across sessions); `u` reviews undoing an older one |
+| `:plan-copy` `:plan > file` | the pending plan as text, to the clipboard or a file |
+| `:extract` `:zip a.zip` `:tar a.tgz` | unpack into a new folder (links, `..` and absolute members refused) · pack the cursor line or a range |
+| `]g` `[g` `gG` `gD` `gl` | next / previous changed entry · only changed entries · diff view · `git log` |
+| `:stage` `:unstage` `:restore` | on the line or a range; `:restore` asks first |
+| `gd` | sizes → perms · size · age → owner · perms · xattrs (`@`) · broken links → off |
+| `gw` | parent-folder column (wide popups); click a header path segment to jump there |
+| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` `:dash` | finder: files · grep · dirs · recent · git changes · dashboard |
 
 | viewer (`⏎` on a file) | |
 |---|---|
 | `j` `k` `␣` `b` `^d` `^u` `g` `G` | scroll |
 | `/pattern` `n` `N` | search the file, next / previous hit |
-| `p` | send the path (with `:line` of the current hit) to the origin pane |
+| `d` | the diff view (starts on from the Git tab and for deleted files); a gutter marks changed lines in the plain view |
+| `L` | `git log --graph` of the file |
+| `p` `P` | send the path (with `:line` of the current hit) · send the lines around it as text |
 | `e` | edit in `$EDITOR` inside the popup, back to the viewer after |
 | `^v` `^x` `^t` `o` `y` | split right · below · tab · system app · copy path |
 | `q` `esc` | back to the listing or finder |
+
+| diff view | |
+|---|---|
+| `j` `k` `␣` `b` `g` `G` | move the cursor |
+| `]c` `[c` · `⇥` `⇧⇥` | next / previous hunk · file |
+| `s` `w` | unified ⇄ split · ignore whitespace |
+| `z` `Z` | 20 more lines of context · the whole file |
+| `v` `c` | mark viewed (on to the next file) · compare working tree / staged / unstaged |
+| `⏎` `e` `^v` `^x` `^t` | open the editor at the cursor's line |
+| `p` `P` | send `path:line` · send the hunk (agents get a bracketed paste; for a shell it goes to the clipboard) |
+| `h` `l` `/` `n` `N` `^l` `d` | scroll sideways · search · reload · back to the plain file |
 
 | finder | |
 |---|---|
@@ -130,6 +173,8 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `^y` `^g` | copy path · system opener |
 | `foo -- *.rs -t py -T md` | grep: limit to globs / ripgrep file types |
 | `^s` | send the selection (or marked files, grep hits with `:line`) to the origin pane |
+| `alt-s` | send the grep lines themselves (`path:line: text`) to an agent |
+| Git tab: `⏎` `^a` `alt-d` | diff view of every change · stage ⇄ unstage · discard (asks) |
 
 Vim support: counts, `h j k l w b e W B E 0 ^ $ gg G f F t T ;`, operators
 `d c y` with motions and text objects `iw aw iW aW`, plus `in`/`an` for the
@@ -141,7 +186,9 @@ file-name stem and extension (`cin` renames `report.md` keeping `.md`),
 `$(herdr plugin config-dir herdr-oil)/config.toml`, see
 [`config.example.toml`](config.example.toml): editor, open target, trash vs
 permanent delete, hidden files, details, preview, icons, git status, confirm,
-stay-open, ignore rules, finder cap.
+stay-open, ignore rules, finder cap, diff layout, rename recipes. The diff
+tints blend into `background` from herdr's `[theme.custom]` (default
+`#222222`) and need a truecolor terminal (`$COLORTERM`).
 
 ## CLI
 
@@ -159,9 +206,12 @@ cargo build --release
 ```
 
 Layout: `buffer.rs` (lines with hidden ids) · `vim.rs` (modal editing) ·
-`plan.rs` (buffer diff → ops + validation) · `apply.rs` (staged execution) ·
-`finder.rs` (nucleo + ignore + rg) · `preview.rs` (bat/ANSI) · `open.rs`
-(editor hand-off) · `launch.rs` (herdr CLI) · `ui.rs` · `app.rs`.
+`input.rs` (shared line editing) · `plan.rs` (buffer diff → ops + validation) ·
+`apply.rs` (staged execution) · `archive.rs` (`:extract` / `:zip`) ·
+`entry.rs` (listing, git status) · `git.rs` (staging, log, show) ·
+`diff.rs` (unified diff parser, word diff, rows) · `diffview.rs` (diff view) ·
+`finder.rs` (nucleo + ignore + rg) · `preview.rs` (bat/ANSI, worker thread) ·
+`open.rs` (editor hand-off) · `launch.rs` (herdr CLI) · `ui.rs` · `app.rs`.
 
 ## Project page
 

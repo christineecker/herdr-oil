@@ -14,7 +14,7 @@ use crate::entry::Store;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Op {
     Create { dst: PathBuf, dir: bool },
     Move { src: PathBuf, dst: PathBuf, dir: bool },
@@ -60,6 +60,8 @@ impl Op {
 pub struct Plan {
     pub ops: Vec<Op>,
     pub errors: Vec<String>,
+    /// Destination `key` → why it cannot be applied, to flag lines inline.
+    pub conflicts: HashMap<String, String>,
 }
 
 impl Plan {
@@ -261,6 +263,28 @@ fn short(p: &Path) -> String {
     }
 }
 
+/// Check a plan again after ops were dropped from it (the review dialog's `x`).
+pub fn revalidate(plan: &mut Plan) {
+    plan.errors.clear();
+    validate(plan);
+}
+
+/// The plan as readable lines (`:plan-copy`, `:plan > file`, `:history`).
+pub fn describe(ops: &[Op]) -> Vec<String> {
+    let slash = |d: bool| if d { "/" } else { "" };
+    ops.iter()
+        .map(|op| match op {
+            Op::Create { dst, dir } => format!("create   {}{}", short(dst), slash(*dir)),
+            Op::Move { src, dst, dir } if src.parent() == dst.parent() => format!("rename   {}{} → {}{}", short(src), slash(*dir), dst.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), slash(*dir)),
+            Op::Move { src, dst, dir } => format!("move     {}{} → {}{}", short(src), slash(*dir), short(dst), slash(*dir)),
+            Op::Copy { src, dst, dir } => format!("copy     {}{} → {}{}", short(src), slash(*dir), short(dst), slash(*dir)),
+            Op::Delete { src, dir } => format!("delete   {}{}", short(src), slash(*dir)),
+            Op::Link { dst, target } => format!("symlink  {} -> {target}", short(dst)),
+            Op::Retarget { path, target } => format!("relink   {} -> {target}", short(path)),
+        })
+        .collect()
+}
+
 fn validate(plan: &mut Plan) {
     let vacated: HashSet<String> = plan
         .ops
@@ -270,27 +294,33 @@ fn validate(plan: &mut Plan) {
         .collect();
     let mut dsts: HashMap<String, &Path> = HashMap::new();
     let mut errs = Vec::new();
+    let mut conflicts = HashMap::new();
     for op in &plan.ops {
         let Some(dst) = op.dst() else { continue };
         let k = key(dst);
+        let mut fail = |why: &str| {
+            errs.push(format!("{}: {why}", short(dst)));
+            conflicts.entry(k.clone()).or_insert_with(|| why.to_string());
+        };
         if dsts.insert(k.clone(), dst).is_some() {
-            errs.push(format!("{}: two entries would get this name", short(dst)));
+            fail("two entries would get this name");
             continue;
         }
         if std::fs::symlink_metadata(dst).is_ok() && !vacated.contains(&k) {
-            errs.push(format!("{}: already exists", short(dst)));
+            fail("already exists");
         }
         if let (Some(src), true) = (op.src(), op.is_dir()) {
             if dst != src && dst.starts_with(src) {
-                errs.push(format!("{}: cannot move or copy a directory into itself", short(dst)));
+                fail("cannot move or copy a directory into itself");
             }
         }
         if dst.components().any(|c| matches!(c, Component::ParentDir)) || !dst.is_absolute() {
-            errs.push(format!("{}: resolves outside the filesystem root", short(dst)));
+            fail("resolves outside the filesystem root");
         }
     }
     errs.dedup();
     plan.errors.extend(errs);
+    plan.conflicts = conflicts;
 }
 
 #[cfg(test)]
@@ -396,12 +426,14 @@ pub mod tests {
         line_of(&mut b, "a.txt").text = "b.txt".into();
         let p = build([&b], &store);
         assert!(p.errors.iter().any(|e| e.contains("already exists")), "{:?}", p.errors);
+        assert_eq!(p.conflicts.get(&key(&_t.0.join("b.txt"))).map(String::as_str), Some("already exists"));
 
         let (_t2, store2, mut b2) = setup("dupe");
         b2.lines.push(Line::new("x"));
         b2.lines.push(Line::new("x"));
         let p2 = build([&b2], &store2);
         assert!(p2.errors.iter().any(|e| e.contains("two entries")), "{:?}", p2.errors);
+        assert!(p2.conflicts.contains_key(&key(&_t2.0.join("x"))));
     }
 
     #[test]

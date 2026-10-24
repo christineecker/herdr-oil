@@ -34,13 +34,18 @@ pub struct Item {
     pub indices: Vec<u32>,
     pub is_dir: bool,
     pub grep_text: Option<String>,
-    /// Git tab: one-letter status (M A D R U ?).
-    pub git: Option<char>,
+    /// Git tab: status (M A D R U ?, staged / unstaged).
+    pub git: Option<crate::entry::Git>,
+    /// Dashboard: why the item is listed (`+ ~ → ⧉ −` pending edit, `◷` recent).
+    pub tag: Option<char>,
 }
 
 pub struct Finder {
     pub kind: FinderKind,
     pub root: PathBuf,
+    /// Root the Git tab replaced with the repository root; restored when
+    /// leaving the tab (unless `set_root` picked another one meanwhile).
+    pub pre_git: Option<PathBuf>,
     pub query: String,
     pub qcur: usize,
     pub sel: usize,
@@ -58,7 +63,11 @@ pub struct Finder {
     grep: Grep,
     recent_file: PathBuf,
     /// Git tab: status per root-relative path; None outside a repository.
-    pub git: Option<std::collections::HashMap<String, char>>,
+    pub git: Option<std::collections::HashMap<String, crate::entry::Git>>,
+    /// Dashboard: pending edits handed in by the app (tag, path).
+    pub pending: Vec<(char, PathBuf)>,
+    /// Dashboard: listed string → (tag, absolute path).
+    dash: std::collections::HashMap<String, (char, PathBuf)>,
 }
 
 struct Grep {
@@ -132,9 +141,14 @@ pub fn tilde(p: &Path) -> String {
 impl Finder {
     pub fn new(kind: FinderKind, root: PathBuf, cfg: &crate::config::Config) -> Finder {
         let dirty = Arc::new(AtomicBool::new(true));
+        let (root, pre_git) = match kind {
+            FinderKind::Git => (repo_root(&root).unwrap_or_else(|| root.clone()), Some(root)),
+            _ => (root, None),
+        };
         let mut f = Finder {
             kind,
             root,
+            pre_git,
             query: String::new(),
             qcur: 0,
             sel: 0,
@@ -160,6 +174,8 @@ impl Finder {
             },
             recent_file: cfg.state_dir.join("recent.txt"),
             git: None,
+            pending: vec![],
+            dash: Default::default(),
         };
         f.restart();
         f
@@ -167,6 +183,12 @@ impl Finder {
 
     pub fn set_kind(&mut self, k: FinderKind) {
         if self.kind != k {
+            if k == FinderKind::Git {
+                let top = repo_root(&self.root).unwrap_or_else(|| self.root.clone());
+                self.pre_git = Some(std::mem::replace(&mut self.root, top));
+            } else if let Some(r) = self.pre_git.take() {
+                self.root = r;
+            }
             self.kind = k;
             self.sel = 0;
             self.scroll = 0;
@@ -176,6 +198,7 @@ impl Finder {
 
     pub fn set_root(&mut self, root: PathBuf) {
         self.root = root;
+        self.pre_git = None;
         self.sel = 0;
         self.scroll = 0;
         self.restart();
@@ -252,8 +275,54 @@ impl Finder {
                 }
                 self.git = changes.map(|v| v.into_iter().map(|(c, p)| (p, c)).collect());
             }
+            FinderKind::Dash => self.fill_dash(),
         }
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Dashboard: pending edits, then git changes, marked and recent files,
+    /// each path once (the first reason wins).
+    fn fill_dash(&mut self) {
+        self.dash.clear();
+        let mut seen = std::collections::HashSet::new();
+        let mut rows: Vec<(String, char, PathBuf)> = Vec::new();
+        let label = |p: &Path, root: &Path| match p.strip_prefix(root) {
+            Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
+            _ => tilde(p),
+        };
+        for (tag, p) in &self.pending {
+            if seen.insert(p.clone()) {
+                rows.push((label(p, &self.root), *tag, p.clone()));
+            }
+        }
+        let changes = crate::entry::work_tree(&self.root).and_then(|r| crate::entry::git_changes(&r).map(|c| (r, c)));
+        let mut git = std::collections::HashMap::new();
+        if let Some((repo, changes)) = changes {
+            for (g, rel) in changes {
+                let p = repo.join(&rel);
+                if seen.insert(p.clone()) {
+                    let l = label(&p, &self.root);
+                    git.insert(l.clone(), g);
+                    rows.push((l, g.letter, p));
+                }
+            }
+        }
+        for m in &self.marked {
+            if seen.insert(m.path.clone()) {
+                rows.push((label(&m.path, &self.root), '●', m.path.clone()));
+            }
+        }
+        for p in read_recent(&self.recent_file).into_iter().take(40) {
+            if p.exists() && seen.insert(p.clone()) {
+                rows.push((label(&p, &self.root), '◷', p));
+            }
+        }
+        let inj = self.nucleo.injector();
+        for (l, tag, p) in rows {
+            inj.push(l.clone(), |s, cols| cols[0] = s.as_str().into());
+            self.dash.insert(l, (tag, p));
+        }
+        self.git = Some(git);
     }
 
     fn start_walk(&mut self) {
@@ -461,7 +530,7 @@ impl Finder {
                 .iter()
                 .map(|h| {
                     let rel = h.path.strip_prefix(&self.root).unwrap_or(&h.path).display().to_string();
-                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None }
+                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None, tag: None }
                 })
                 .collect();
         }
@@ -474,13 +543,17 @@ impl Finder {
             idx.sort_unstable();
             idx.dedup();
             let s = it.data.clone();
-            let abs = if self.kind == FinderKind::Recent {
+            let dash = self.dash.get(&s).filter(|_| self.kind == FinderKind::Dash);
+            let abs = if let Some((_, p)) = dash {
+                p.clone()
+            } else if self.kind == FinderKind::Recent {
                 expand_tilde(&s)
             } else {
                 plan_normalize(&self.root.join(s.trim_end_matches('/')))
             };
-            let git = self.git.as_ref().filter(|_| self.kind == FinderKind::Git).and_then(|m| m.get(&s).copied());
-            out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None, git });
+            let git = self.git.as_ref().filter(|_| matches!(self.kind, FinderKind::Git | FinderKind::Dash)).and_then(|m| m.get(&s).copied());
+            let tag = dash.map(|(t, _)| *t).filter(|_| git.is_none());
+            out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None, git, tag });
         }
         out
     }
@@ -596,7 +669,28 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let it = f.selected().unwrap();
-        assert_eq!((it.display.as_str(), it.git), ("new.rs", Some('?')));
+        assert_eq!((it.display.as_str(), it.git.map(|g| g.letter)), ("new.rs", Some('?')));
+    }
+
+    #[test]
+    fn dashboard_merges_sources() {
+        let t = crate::plan::tests::tmpdir("finder-dash");
+        Command::new("git").args(["init", "-q"]).current_dir(&t.0).output().unwrap();
+        std::fs::write(t.0.join("changed.rs"), "x").unwrap();
+        std::fs::write(t.0.join("old.txt"), "x").unwrap();
+        let cfg = crate::config::Config { state_dir: t.0.join(".state"), ..Default::default() };
+        push_recent(&cfg.state_dir, &[t.0.join("old.txt"), t.0.join("changed.rs")]);
+        let mut f = Finder::new(FinderKind::Files, t.0.clone(), &cfg);
+        f.pending = vec![('+', t.0.join("new.md"))];
+        f.set_kind(FinderKind::Dash);
+        for _ in 0..50 {
+            f.tick();
+        }
+        let items = f.items(0, 10);
+        let got: Vec<(String, Option<char>, Option<char>)> = items.iter().map(|i| (i.display.clone(), i.tag, i.git.map(|g| g.letter))).collect();
+        assert!(got.contains(&("new.md".into(), Some('+'), None)), "{got:?}");
+        assert!(got.contains(&("changed.rs".into(), None, Some('?'))), "{got:?}");
+        assert_eq!(got.iter().filter(|g| g.0 == "changed.rs").count(), 1, "listed once");
     }
 
     #[test]
@@ -661,5 +755,20 @@ mod tests {
         let g = f.items(0, 5);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].line, Some(1));
+    }
+
+    #[test]
+    fn git_tab_roots_at_repo() {
+        let t = crate::plan::tests::tmpdir("finder-git-root");
+        Command::new("git").args(["init", "-q"]).current_dir(&t.0).output().unwrap();
+        let sub = t.0.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let cfg = crate::config::Config::default();
+        let mut f = Finder::new(FinderKind::Files, sub.clone(), &cfg);
+        f.set_kind(FinderKind::Git);
+        assert_eq!(f.root, t.0);
+        f.set_kind(FinderKind::Files);
+        assert_eq!(f.root, sub);
+        assert_eq!(Finder::new(FinderKind::Git, sub, &cfg).root, t.0);
     }
 }
