@@ -34,6 +34,9 @@ pub fn cmd(dir: &Path) -> Command {
         "gpg.ssh.program=false",
         "-c",
         "gpg.x509.program=false",
+        // never pick up a bare repository a folder happens to be laid out as
+        "-c",
+        "safe.bareRepository=explicit",
         "--no-optional-locks",
         "--no-pager",
     ])

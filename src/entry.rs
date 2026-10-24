@@ -517,11 +517,35 @@ impl Branch {
     }
 }
 
+/// A directory git would take for a bare repository (`HEAD`, `objects/`, `refs/`).
+fn looks_bare(d: &Path) -> bool {
+    d.join("HEAD").is_file() && d.join("objects").is_dir() && d.join("refs").is_dir()
+}
+
 /// The work tree containing `dir`: the nearest ancestor with a `.git`
 /// directory or file (worktrees, submodules), found without running git.
+/// `None` when a bare-repository layout comes first: git would discover
+/// that one instead (with its own config), so nothing may run there.
 pub fn work_tree(dir: &Path) -> Option<PathBuf> {
     let dir = fs::canonicalize(dir).ok()?;
-    dir.ancestors().find(|d| fs::symlink_metadata(d.join(".git")).is_ok()).map(Path::to_path_buf)
+    for d in dir.ancestors() {
+        if looks_bare(d) {
+            return None;
+        }
+        if fs::symlink_metadata(d.join(".git")).is_ok() {
+            return Some(d.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Environment that changes which repository or config git uses: with any
+/// of it set, discovery is git's business alone and nothing is cached.
+fn discovery_env() -> bool {
+    std::env::vars_os().any(|(k, _)| {
+        let k = k.to_string_lossy();
+        matches!(k.as_ref(), "GIT_DIR" | "GIT_WORK_TREE" | "GIT_COMMON_DIR" | "GIT_CEILING_DIRECTORIES" | "GIT_DISCOVERY_ACROSS_FILESYSTEM") || k.starts_with("GIT_CONFIG")
+    })
 }
 
 /// How long a "no filters here" verdict is trusted without re-checking
@@ -549,30 +573,31 @@ fn filter_cache() -> &'static std::sync::Mutex<FilterCache> {
 /// unpacked archive, a shared folder; local, worktree or included files)
 /// could make us execute arbitrary commands. Reading config never runs filters.
 ///
-/// The verdict is cached per work tree (keyed by its config files' mtimes,
-/// and for [`FILTER_TTL`] at most) so walking around a repository costs no
-/// extra `git config` call per directory.
+/// The verdict is cached per directory (keyed by the work tree's config
+/// files' mtimes, and for [`FILTER_TTL`] at most), so revisiting folders
+/// costs no extra `git config` call. The check runs in the same directory,
+/// with the same discovery rules, as the git command it guards.
 pub fn repo_defines_filters(dir: &Path) -> bool {
-    let root = work_tree(dir);
-    if let Some(r) = &root {
-        let stamp = config_stamp(r);
-        if let Some((t, st, v)) = filter_cache().lock().ok().and_then(|c| c.get(r).cloned()) {
-            if st == stamp && t.elapsed() < FILTER_TTL {
-                return v;
-            }
-        }
-        let v = filters_uncached(dir);
-        if let Ok(mut c) = filter_cache().lock() {
-            c.insert(r.clone(), (std::time::Instant::now(), stamp, v));
-        }
-        return v;
+    let (Some(root), Ok(key)) = (work_tree(dir), fs::canonicalize(dir)) else { return filters_uncached(dir) };
+    if discovery_env() {
+        return filters_uncached(dir);
     }
-    filters_uncached(dir)
+    let stamp = config_stamp(&root);
+    if let Some((t, st, v)) = filter_cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
+        if st == stamp && t.elapsed() < FILTER_TTL {
+            return v;
+        }
+    }
+    let v = filters_uncached(dir);
+    if let Ok(mut c) = filter_cache().lock() {
+        c.insert(key, (std::time::Instant::now(), stamp, v));
+    }
+    v
 }
 
 fn filters_uncached(dir: &Path) -> bool {
     let out = std::process::Command::new("git")
-        .args(["config", "--list", "--show-scope", "--includes", "--name-only"])
+        .args(["-c", "safe.bareRepository=explicit", "config", "--list", "--show-scope", "--includes", "--name-only"])
         .current_dir(dir)
         .stderr(std::process::Stdio::null())
         .output();
@@ -625,6 +650,8 @@ fn status_records(dir: &Path, untracked: &str, ignored: bool) -> Option<Status> 
             "status.submoduleSummary=false",
             "-c",
             "status.renames=true",
+            "-c",
+            "safe.bareRepository=explicit",
             "--no-optional-locks",
             "status",
             "--ignore-submodules=all",
@@ -771,6 +798,27 @@ mod tests {
         assert!(git_status(&t).is_empty());
         assert!(!marker.exists());
         let _ = fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn bare_repo_inside_a_work_tree_is_refused() {
+        let t = crate::plan::tests::tmpdir("git-bare-inside");
+        let git = |args: &[&str], d: &Path| std::process::Command::new("git").args(args).current_dir(d).output().unwrap();
+        git(&["init", "-q"], &t.0);
+        // warm the cache for the outer repository
+        assert!(!repo_defines_filters(&t.0));
+        let evil = t.0.join("evil");
+        fs::create_dir(&evil).unwrap();
+        git(&["init", "-q", "--bare"], &evil);
+        let marker = t.0.join("pwned");
+        git(&["config", "filter.x.clean", &format!("touch {}", marker.display())], &evil);
+        git(&["config", "core.worktree", &evil.display().to_string()], &evil);
+        fs::write(evil.join("a.txt"), "x").unwrap();
+        fs::write(evil.join(".gitattributes"), "* filter=x\n").unwrap();
+        assert_eq!(work_tree(&evil), None);
+        assert!(git_status(&evil).is_empty());
+        assert!(crate::git::guard(&evil).is_err());
+        assert!(!marker.exists());
     }
 
     #[test]
