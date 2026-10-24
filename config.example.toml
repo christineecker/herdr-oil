@@ -33,3 +33,12 @@
 # [recipes]
 # photos = ["screenshots", "prefix {02#}-"]   # {#} counts: {02#} 01 02 …
 # underscores = "s/ /_/g"
+
+# Projects tab (␣p): defaults come from herdr-hop's config.toml when it is
+# installed (and its recent.tsv is shared); set any key here to override.
+# [projects]
+# roots = ["~/Projects"]
+# max_depth = 2
+# recent_limit = 12
+# default_root = "~/Projects"   # where ^n creates projects
+# default_branch = "main"

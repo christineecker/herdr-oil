@@ -744,6 +744,13 @@ fn status_letter(xy: &str) -> char {
 
 /// Changed and untracked files under `dir` (relative paths), for the
 /// finder's Git tab. `None` when `dir` is not (safely) in a repository.
+/// Branch and changed paths of the repository at `dir` (untracked folders
+/// collapsed), for the Projects tab. `None` outside a repository.
+pub fn repo_status(dir: &Path) -> Option<(Option<Branch>, Vec<(Git, String)>)> {
+    let st = status_records(dir, "--untracked-files=normal", false)?;
+    Some((st.branch, st.records.into_iter().map(|r| (Git::from_xy(&r.xy), r.path)).collect()))
+}
+
 pub fn git_changes(dir: &Path) -> Option<Vec<(Git, String)>> {
     let st = status_records(dir, "--untracked-files=all", false)?;
     Some(st.records.into_iter().map(|r| (Git::from_xy(&r.xy), r.path)).collect())

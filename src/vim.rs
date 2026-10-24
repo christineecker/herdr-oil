@@ -17,6 +17,9 @@ pub enum FinderKind {
     Git,
     /// Triage: git changes, pending edits, marked and recent files together.
     Dash,
+    /// Projects under the configured roots (herdr-hop's), hopped to as
+    /// herdr workspaces.
+    Projects,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -718,6 +721,7 @@ impl Vim {
             "files" => Action::Finder(FinderKind::Files),
             "grep" | "rg" => Action::Finder(FinderKind::Grep),
             "dash" | "dashboard" => Action::Finder(FinderKind::Dash),
+            "projects" | "proj" | "hop" => Action::Finder(FinderKind::Projects),
             "noh" | "nohlsearch" => {
                 self.search.clear();
                 Action::None
@@ -1166,6 +1170,7 @@ impl Vim {
                     'd' => Action::Finder(FinderKind::Dirs),
                     'r' => Action::Finder(FinderKind::Recent),
                     's' => Action::Finder(FinderKind::Git),
+                    'p' => Action::Finder(FinderKind::Projects),
                     _ => return Parse::Bad,
                 };
                 Parse::Done
@@ -1582,7 +1587,7 @@ impl Vim {
 
 /// Ex command names offered by `<Tab>` completion.
 const EX_COMMANDS: &[&str] = &[
-    "cd", "changed", "chmod", "dash", "details", "diff", "edit", "edit-buffer", "extract", "files", "grep", "help", "hidden", "history", "log", "marks", "mkdir", "noh", "parent", "plan", "plan-copy", "prefix", "preview", "pwd", "quit", "recipe", "restore", "reverse", "send", "sort", "stage", "suffix", "tar", "touch", "undo-apply", "unstage", "write", "zip",
+    "cd", "changed", "chmod", "dash", "details", "diff", "edit", "edit-buffer", "extract", "files", "grep", "help", "hidden", "history", "log", "marks", "mkdir", "noh", "parent", "plan", "plan-copy", "prefix", "preview", "projects", "pwd", "quit", "recipe", "restore", "reverse", "send", "sort", "stage", "suffix", "tar", "touch", "undo-apply", "unstage", "write", "zip",
 ];
 
 /// A parsed `s/pat/rep/flags`.

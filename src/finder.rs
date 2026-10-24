@@ -1,6 +1,8 @@
 //! Fuzzy finder: files / directories (parallel `ignore` walk into nucleo),
-//! live grep (ripgrep, falling back to grep), and recently opened files.
+//! live grep (ripgrep, falling back to grep), recently opened files, and
+//! projects (see [`crate::projects`]).
 
+use crate::projects::{self, Proj, Scope};
 use crate::vim::FinderKind;
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config as NConfig, Matcher, Nucleo};
@@ -38,6 +40,8 @@ pub struct Item {
     pub git: Option<crate::entry::Git>,
     /// Dashboard: why the item is listed (`+ ~ → ⧉ −` pending edit, `◷` recent).
     pub tag: Option<char>,
+    /// Projects tab: the project behind the row.
+    pub proj: Option<Proj>,
 }
 
 pub struct Finder {
@@ -68,6 +72,13 @@ pub struct Finder {
     pub pending: Vec<(char, PathBuf)>,
     /// Dashboard: listed string → (tag, absolute path).
     dash: std::collections::HashMap<String, (char, PathBuf)>,
+    /// Projects tab: listed string → row (filled by a worker thread; the
+    /// dirty counts land a little later).
+    projects: Arc<Mutex<std::collections::HashMap<String, Proj>>>,
+    pub proj_scope: Scope,
+    pub proj_settings: projects::Settings,
+    /// Where the finder was opened: marks the project you are in.
+    here: PathBuf,
 }
 
 struct Grep {
@@ -141,6 +152,7 @@ pub fn tilde(p: &Path) -> String {
 impl Finder {
     pub fn new(kind: FinderKind, root: PathBuf, cfg: &crate::config::Config) -> Finder {
         let dirty = Arc::new(AtomicBool::new(true));
+        let here = root.clone();
         let (root, pre_git) = match kind {
             FinderKind::Git => (repo_root(&root).unwrap_or_else(|| root.clone()), Some(root)),
             _ => (root, None),
@@ -176,6 +188,10 @@ impl Finder {
             git: None,
             pending: vec![],
             dash: Default::default(),
+            projects: Default::default(),
+            proj_scope: Scope::All,
+            proj_settings: cfg.projects.clone(),
+            here,
         };
         f.restart();
         f
@@ -276,8 +292,90 @@ impl Finder {
                 self.git = changes.map(|v| v.into_iter().map(|(c, p)| (p, c)).collect());
             }
             FinderKind::Dash => self.fill_dash(),
+            FinderKind::Projects => self.start_projects(),
         }
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Projects tab: `^a` cycles all → open → dirty → recent.
+    pub fn cycle_scope(&mut self) {
+        self.proj_scope = self.proj_scope.next();
+        self.sel = 0;
+        self.scroll = 0;
+        self.restart();
+    }
+
+    /// List the projects off the UI thread (herdr and the index take a
+    /// moment), then check git state for the rows that show it: recent and
+    /// open ones, or every project for the dirty scope (which lists only
+    /// those with changes or unpushed commits).
+    fn start_projects(&mut self) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.walk_cancel = cancel.clone();
+        let rows = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        self.projects = rows.clone();
+        let (walking, dirty, inj) = (self.walking.clone(), self.dirty.clone(), self.nucleo.injector());
+        let (s, scope, here) = (self.proj_settings.clone(), self.proj_scope, self.here.clone());
+        walking.store(true, Ordering::Relaxed);
+        std::thread::spawn(move || {
+            let mut list = projects::collect(&s, scope, &here);
+            // listed string: name and branch (so branches are searchable), unique
+            let mut keys: Vec<String> = Vec::with_capacity(list.len());
+            for r in &list {
+                let mut k = match &r.head {
+                    Some(h) => format!("{}  {}", r.name, h.name),
+                    None => r.name.clone(),
+                };
+                if keys.contains(&k) {
+                    k = format!("{}  {}", tilde(&r.path), r.head.as_ref().map(|h| h.name.as_str()).unwrap_or(""));
+                }
+                keys.push(k);
+            }
+            let inject = |list: &[Proj], keys: &[String]| {
+                let mut m = rows.lock().unwrap();
+                for (r, k) in list.iter().zip(keys) {
+                    m.insert(k.clone(), r.clone());
+                    inj.push(k.clone(), |s, cols| cols[0] = s.as_str().into());
+                }
+            };
+            if scope != Scope::Dirty {
+                inject(&list, &keys);
+                dirty.store(true, Ordering::Relaxed);
+            }
+            let check: Vec<usize> = (0..list.len()).filter(|&i| scope == Scope::Dirty || list[i].hopped.is_some() || list[i].ws.is_some()).collect();
+            let next = AtomicUsize::new(0);
+            let found = Mutex::new(Vec::new());
+            std::thread::scope(|sc| {
+                for _ in 0..8 {
+                    sc.spawn(|| loop {
+                        let n = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&i) = check.get(n) else { break };
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if let Some(d) = projects::dirty(&list[i].path) {
+                            found.lock().unwrap().push((i, d));
+                        }
+                    });
+                }
+            });
+            // a newer scan owns `walking` now
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            for (i, d) in found.into_inner().unwrap() {
+                list[i].dirty = Some(d);
+                if let Some(r) = rows.lock().unwrap().get_mut(&keys[i]) {
+                    r.dirty = Some(d);
+                }
+            }
+            if scope == Scope::Dirty {
+                let (l, k): (Vec<Proj>, Vec<String>) = list.into_iter().zip(keys).filter(|(r, _)| r.dirty.is_some_and(|(n, a)| n > 0 || a > 0)).unzip();
+                inject(&l, &k);
+            }
+            walking.store(false, Ordering::Relaxed);
+            dirty.store(true, Ordering::Relaxed);
+        });
     }
 
     /// Dashboard: pending edits, then git changes, marked and recent files,
@@ -530,10 +628,12 @@ impl Finder {
                 .iter()
                 .map(|h| {
                     let rel = h.path.strip_prefix(&self.root).unwrap_or(&h.path).display().to_string();
-                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None, tag: None }
+                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None, tag: None, proj: None }
                 })
                 .collect();
         }
+        let rows = self.projects.clone();
+        let rows = rows.lock().ok().filter(|_| self.kind == FinderKind::Projects);
         let snap = self.nucleo.snapshot();
         let pat = snap.pattern().column_pattern(0);
         let mut out = Vec::with_capacity(end - start);
@@ -544,7 +644,10 @@ impl Finder {
             idx.dedup();
             let s = it.data.clone();
             let dash = self.dash.get(&s).filter(|_| self.kind == FinderKind::Dash);
-            let abs = if let Some((_, p)) = dash {
+            let proj = rows.as_ref().and_then(|m| m.get(&s).cloned());
+            let abs = if let Some(p) = &proj {
+                p.path.clone()
+            } else if let Some((_, p)) = dash {
                 p.clone()
             } else if self.kind == FinderKind::Recent {
                 expand_tilde(&s)
@@ -553,7 +656,7 @@ impl Finder {
             };
             let git = self.git.as_ref().filter(|_| matches!(self.kind, FinderKind::Git | FinderKind::Dash)).and_then(|m| m.get(&s).copied());
             let tag = dash.map(|(t, _)| *t).filter(|_| git.is_none());
-            out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None, git, tag });
+            out.push(Item { is_dir: s.ends_with('/') || proj.is_some(), display: s, abs, line: None, indices: idx, grep_text: None, git, tag, proj });
         }
         out
     }
@@ -691,6 +794,55 @@ mod tests {
         assert!(got.contains(&("new.md".into(), Some('+'), None)), "{got:?}");
         assert!(got.contains(&("changed.rs".into(), None, Some('?'))), "{got:?}");
         assert_eq!(got.iter().filter(|g| g.0 == "changed.rs").count(), 1, "listed once");
+    }
+
+    #[test]
+    fn projects_tab_lists_and_scopes() {
+        let t = crate::plan::tests::tmpdir("finder-proj");
+        for n in ["clean", "busy", "plain"] {
+            std::fs::create_dir_all(t.0.join(n)).unwrap();
+        }
+        let git = |d: &str, args: &[&str]| Command::new("git").args(args).current_dir(t.0.join(d)).output().unwrap();
+        git("clean", &["init", "-q", "-b", "trunk"]);
+        git("busy", &["init", "-q", "-b", "wip"]);
+        std::fs::write(t.0.join("busy/x.txt"), "x").unwrap();
+        let mut cfg = crate::config::Config { state_dir: t.0.join(".state"), ..Default::default() };
+        cfg.projects.roots = vec![t.0.clone()];
+        cfg.projects.recent_file = t.0.join(".state/recent.tsv");
+        projects::bump_recent(&cfg.projects.recent_file, &t.0.join("busy"));
+        let mut f = Finder::new(FinderKind::Projects, t.0.join("clean"), &cfg);
+        let settle = |f: &mut Finder| {
+            for _ in 0..400 {
+                f.tick();
+                if !f.walking() {
+                    for _ in 0..20 {
+                        f.tick();
+                    }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        settle(&mut f);
+        let items = f.items(0, 10);
+        assert_eq!(items.len(), 3);
+        let first = items[0].proj.as_ref().unwrap();
+        assert_eq!((first.name.as_str(), first.dirty), ("busy", Some((1, 0))), "recent first, dirty counted");
+        assert!(items.iter().all(|i| i.is_dir));
+        assert!(items.iter().any(|i| i.proj.as_ref().is_some_and(|p| p.name == "clean" && p.here)));
+        // branch names are searchable
+        f.query = "trunk".into();
+        f.query_changed(true);
+        settle(&mut f);
+        assert_eq!(f.items(0, 10).iter().map(|i| i.proj.as_ref().unwrap().name.clone()).collect::<Vec<_>>(), ["clean"]);
+        f.query.clear();
+        f.query_changed(false);
+        // all → open → dirty
+        f.cycle_scope();
+        f.cycle_scope();
+        assert_eq!(f.proj_scope, Scope::Dirty);
+        settle(&mut f);
+        assert_eq!(f.items(0, 10).iter().map(|i| i.abs.clone()).collect::<Vec<_>>(), [t.0.join("busy")]);
     }
 
     #[test]

@@ -65,3 +65,10 @@ title = "Oil: changed files…"
 description = "Changed and untracked files (git status) with diff previews."
 contexts = ["workspace"]
 command = ["./target/release/herdr-oil", "--launch", "git"]
+
+[[actions]]
+id = "projects"
+title = "Oil: hop to project…"
+description = "Projects under herdr-hop's roots (recent first); Enter focuses or creates the workspace."
+contexts = ["workspace"]
+command = ["./target/release/herdr-oil", "--launch", "projects"]

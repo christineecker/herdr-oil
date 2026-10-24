@@ -63,12 +63,16 @@ pub struct Config {
     pub diff_layout: crate::diffview::Layout,
     /// `[recipes]`: name → range commands (`"s/ /_/g"`, `["kebab", "prefix {02#}-"]`).
     pub recipes: Vec<(String, Vec<String>)>,
+    /// Projects tab: herdr-hop's config, then our `[projects]` table.
+    pub projects: crate::projects::Settings,
 }
 
 impl Default for Config {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let state_dir = PathBuf::from(&home).join(".local/state/herdr-oil");
         Config {
+            projects: crate::projects::Settings::new(&state_dir),
             editor: None,
             open: OpenTarget::View,
             delete: DeleteMethod::Trash,
@@ -81,7 +85,7 @@ impl Default for Config {
             stay_open: false,
             respect_ignore: true,
             max_files: 200_000,
-            state_dir: PathBuf::from(home).join(".local/state/herdr-oil"),
+            state_dir,
             diff_layout: crate::diffview::Layout::Auto,
             recipes: vec![],
         }
@@ -108,8 +112,13 @@ impl Config {
         let mut c = Config::default();
         if let Some(dir) = std::env::var("HERDR_PLUGIN_STATE_DIR").ok().filter(|s| !s.is_empty()) {
             c.state_dir = PathBuf::from(dir);
+            c.projects = crate::projects::Settings::new(&c.state_dir);
         }
         let Some(dir) = config_dir() else { return c };
+        // herdr-hop's roots etc. are the defaults for the Projects tab
+        if let Some(hop) = crate::projects::hop_config(&dir).and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| t.parse::<toml::Table>().ok()) {
+            c.projects.apply(&hop);
+        }
         let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) else {
             return c;
         };
@@ -170,6 +179,9 @@ impl Config {
         }
         if let Some(v) = s("diff_layout").as_deref().and_then(crate::diffview::Layout::parse) {
             self.diff_layout = v;
+        }
+        if let Some(t) = doc.get("projects").and_then(|v| v.as_table()) {
+            self.projects.apply(t);
         }
         if let Some(t) = doc.get("recipes").and_then(|v| v.as_table()) {
             self.recipes = t

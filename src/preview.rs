@@ -20,6 +20,9 @@ pub enum Show {
     Diff,
     /// `git log --graph` of the path.
     Log,
+    /// A project card: herdr workspace, branch, changes, last commits,
+    /// then the folder listing with its README.
+    Project,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -157,6 +160,7 @@ fn render_key(k: &Key, th: &Theme) -> (Vec<Line<'static>>, usize) {
     match k.show {
         Show::Diff => git_diff(&k.path, th, k.width, k.max).map(|v| (v, 0)).unwrap_or_else(|| render(&k.path, k.line, k.width, th, k.hidden, k.max)),
         Show::Log => (git_log(&k.path, th, k.max), 0),
+        Show::Project => (project(&k.path, th, k.hidden, k.max, k.width), 0),
         Show::File => render(&k.path, k.line, k.width, th, k.hidden, k.max),
     }
 }
@@ -172,6 +176,93 @@ fn git_log(path: &Path, th: &Theme, max: usize) -> Vec<Line<'static>> {
         }
         Err(e) => vec![Line::styled(format!(" {e}"), Style::default().fg(th.red))],
     }
+}
+
+/// Projects tab preview: what herdr has open there, the git state (the
+/// usual safety knobs and filter guard), then the folder itself.
+fn project(path: &Path, th: &Theme, hidden: bool, max: usize, width: u16) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(th.dim);
+    let mut v = vec![Line::styled(format!(" {}", crate::finder::tilde(path)), dim)];
+    let set = std::iter::once(path.to_path_buf()).collect();
+    if let Some(ws) = crate::projects::workspaces(&set).remove(path) {
+        let mut sp = vec![Span::styled(format!(" \u{25b6} workspace {} · {}", ws.number, ws.label), Style::default().fg(th.accent).add_modifier(Modifier::BOLD))];
+        sp.push(Span::styled(format!(" · {} tabs · {} panes", ws.tabs, ws.panes), dim));
+        if ws.agents > 0 {
+            let c = match ws.status.as_str() {
+                "working" => th.green,
+                "waiting" => th.yellow,
+                _ => th.dim,
+            };
+            sp.push(Span::styled(format!(" · {} agent{} {}", ws.agents, if ws.agents == 1 { "" } else { "s" }, ws.status), Style::default().fg(c)));
+        }
+        v.push(Line::from(sp));
+        v.push(Line::styled("   ⏎ jumps to its tab · ^k ^k closes it", dim));
+    }
+    v.push(Line::raw(""));
+    match crate::entry::repo_status(path).filter(|_| std::fs::symlink_metadata(path.join(".git")).is_ok()) {
+        Some((branch, files)) => {
+            let b = branch.unwrap_or_default();
+            let mut sp = vec![Span::styled(format!(" \u{e725} {}", if b.name.is_empty() { "?".into() } else { b.name.clone() }), Style::default().fg(if b.detached { th.peach } else { th.green }).add_modifier(Modifier::BOLD))];
+            if let Some(u) = &b.upstream {
+                sp.push(Span::styled(format!(" → {u}"), dim));
+            }
+            if b.ahead > 0 {
+                sp.push(Span::styled(format!(" ↑{}", b.ahead), Style::default().fg(th.yellow)));
+            }
+            if b.behind > 0 {
+                sp.push(Span::styled(format!(" ↓{}", b.behind), Style::default().fg(th.peach)));
+            }
+            if b.unborn {
+                sp.push(Span::styled(" · no commits yet", dim));
+            }
+            if files.is_empty() {
+                sp.push(Span::styled(" · clean", dim));
+            } else {
+                sp.push(Span::styled(format!(" · {} changed", files.len()), Style::default().fg(th.red)));
+            }
+            v.push(Line::from(sp));
+            for (g, f) in files.iter().take(8) {
+                let c = match g.letter {
+                    'D' => th.red,
+                    '?' => th.dim,
+                    'A' => th.green,
+                    _ if g.staged && !g.unstaged => th.green,
+                    _ => th.yellow,
+                };
+                v.push(Line::from(vec![Span::styled(format!("   {} ", g.letter), Style::default().fg(c).add_modifier(Modifier::BOLD)), Span::styled(f.clone(), Style::default().fg(th.subtext))]));
+            }
+            if files.len() > 8 {
+                v.push(Line::styled(format!("   … {} more", files.len() - 8), dim));
+            }
+            if !b.unborn {
+                let mut c = crate::git::cmd(path);
+                c.args(["log", "--no-show-signature", "-4", "--format=%h\t%cr\t%s"]).stderr(Stdio::null());
+                if let Ok(out) = c.output() {
+                    v.push(Line::raw(""));
+                    for l in String::from_utf8_lossy(&out.stdout).lines() {
+                        let mut it = l.splitn(3, '\t');
+                        let (h, when, subj) = (it.next().unwrap_or(""), it.next().unwrap_or(""), it.next().unwrap_or(""));
+                        v.push(Line::from(vec![
+                            Span::styled(format!(" {h} "), Style::default().fg(th.peach)),
+                            Span::styled(format!("{when:<14} "), dim),
+                            Span::styled(subj.to_string(), Style::default().fg(th.text)),
+                        ]));
+                    }
+                }
+                let mut c = crate::git::cmd(path);
+                c.args(["worktree", "list", "--porcelain"]).stderr(Stdio::null());
+                let wts = c.output().map(|o| String::from_utf8_lossy(&o.stdout).lines().filter(|l| l.starts_with("worktree ")).count()).unwrap_or(0);
+                if wts > 1 {
+                    v.push(Line::styled(format!(" \u{f0645} {} worktrees", wts), Style::default().fg(th.teal)));
+                }
+            }
+        }
+        None if std::fs::symlink_metadata(path.join(".git")).is_ok() => v.push(Line::styled(" git state hidden (repository defines its own filters)", dim)),
+        None => v.push(Line::styled(" not a git repository", dim)),
+    }
+    v.push(Line::raw(""));
+    v.extend(dir_listing(path, th, hidden, max.min(14), width));
+    v
 }
 
 fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize) -> (Vec<Line<'static>>, usize) {

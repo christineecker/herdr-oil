@@ -1,7 +1,7 @@
 //! herdr-oil: an oil.nvim-style file explorer and fuzzy finder for herdr.
 //!
 //!   herdr-oil                    run the TUI (dir from $HERDR_OIL_ROOT, else cwd)
-//!   herdr-oil --launch MODE      open the popup for the focused pane (explorer|finder|grep|recent|git)
+//!   herdr-oil --launch MODE      open the popup for the focused pane (explorer|finder|grep|recent|git|projects)
 //!   herdr-oil [DIR|FILE]         explore DIR (or FILE's directory, cursor on it)
 //!   herdr-oil --finder|--grep    start in the finder
 //!   herdr-oil --pick             print the chosen file(s) to stdout instead of opening
@@ -21,6 +21,7 @@ mod launch;
 mod open;
 mod plan;
 mod preview;
+mod projects;
 mod theme;
 mod ui;
 mod vim;
@@ -31,8 +32,8 @@ use std::path::PathBuf;
 
 fn usage() {
     println!(
-        "herdr-oil {}\n\nusage: herdr-oil [--launch MODE] [--finder|--grep|--recent|--git] [--pick] [DIR|FILE]\n\n\
-         MODE: explorer (default), finder, grep, recent, git",
+        "herdr-oil {}\n\nusage: herdr-oil [--launch MODE] [--finder|--grep|--recent|--git|--projects] [--pick] [DIR|FILE]\n\n\
+         MODE: explorer (default), finder, grep, recent, git, projects",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -57,6 +58,7 @@ fn main() {
             "--grep" => mode = "grep".into(),
             "--recent" => mode = "recent".into(),
             "--git" => mode = "git".into(),
+            "--projects" => mode = "projects".into(),
             "--pick" => pick = true,
             "--version" | "-V" => {
                 println!("herdr-oil {}", env!("CARGO_PKG_VERSION"));
@@ -83,7 +85,11 @@ fn main() {
     // Only label panes we were launched into (the plugin popup), never a
     // user's own pane where they ran `herdr-oil` by hand.
     if !pick && std::env::var("HERDR_OIL_ROOT").is_ok() {
-        launch::announce_pane(if mode == "explorer" { "Oil" } else { "Find" });
+        launch::announce_pane(match mode.as_str() {
+            "explorer" => "Oil",
+            "projects" => "Projects",
+            _ => "Find",
+        });
     }
     let cfg = config::Config::load();
     let mut terminal = ratatui::init();

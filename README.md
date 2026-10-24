@@ -25,12 +25,14 @@ case-only renames on APFS, "move the child out, delete the parent" and
 overwritten; clashes are reported before anything runs, and flagged on
 the line (`! ✗ already exists`) while you type.
 
-The finder (`⇥` from the explorer, or its own key) has six modes:
+The finder (`⇥` from the explorer, or its own key) has seven modes:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
 matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
 opened through herdr-oil), **Git** (changed and untracked files across the
 whole repository; `⏎` opens the diff view, `^a` stages, `alt-d` discards) and
-**Dash** (pending edits, git changes, marked and recent files in one list).
+**Dash** (pending edits, git changes, marked and recent files in one list) and
+**Projects** (every project under your roots, recent hops first, like
+[herdr-hop](../herdr-hop): `⏎` focuses the workspace open there or creates one).
 Previews use `bat` when installed and render off the UI thread. Folder previews
 show counts, sizes and the README; archives (`zip`, `tar.*`), SQLite schemas,
 binary plists and PDFs (`pdfinfo` / `pdftotext`, else `mdls`) are described
@@ -75,8 +77,39 @@ type = "plugin_action"
 command = "herdr-oil.grep"
 ```
 
-Actions: `explorer`, `finder`, `grep`, `recent`, `git`. Each opens the popup at the
+Actions: `explorer`, `finder`, `grep`, `recent`, `git`, `projects`. Each opens the popup at the
 focused pane's working directory.
+
+## Projects
+
+`␣p`, `:projects` or the `projects` action. Reads herdr-hop's `config.toml`
+(`roots`, `max_depth`, `recent_limit`, `default_root`, `default_branch`) and
+shares its `recent.tsv`, so hopping from either plugin ranks the same; a
+`[projects]` table in herdr-oil's config overrides any of these (and
+`recent_file`). Without herdr-hop the defaults are `~/Projects`, depth 2.
+
+```
+▌▎▶  herdr-oil        2m   main              ●3  2 ▶ working  ◆ here
+ ▎   herdr-hop        1h   main              ○
+  ▶  wgas-wiki             main
+     paper-rag             wiki_dev
+```
+
+`▎` recent · `▶` open workspace · stack icon · time since the hop · branch
+(peach when detached, `(repo)` for linked worktrees) · `●N` changed /
+`↑N` unpushed / `○` clean (recent and open rows) · agents · `◆` the project
+oil was opened in. Branch names are searchable. The preview shows the
+workspace, branch with upstream, changed files, the last commits,
+worktrees, then the folder and its README.
+
+| key | does |
+|---|---|
+| `⏎` | jump to the workspace and tab open on the project, else `herdr workspace create --cwd --label --focus` |
+| `^t` | open as a tab in the current workspace |
+| `^o` `^f` `alt-g` | explore it in oil · find files in it · grep in it |
+| `^n` | new project named by the query: `default_root/name`, `git init -b`, README, first commit, then hop |
+| `^a` | scope: all → open → dirty (changes or unpushed) → recent |
+| `^x` `^k ^k` | forget from recent · close its workspace, or only its tab when other projects share the workspace (never both) |
 
 ## Opening files
 
@@ -139,7 +172,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:stage` `:unstage` `:restore` | on the line or a range; `:restore` asks first |
 | `gd` | sizes → perms · size · age → owner · perms · xattrs (`@`) · broken links → off |
 | `gw` | parent-folder column (wide popups); click a header path segment to jump there |
-| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` `:dash` | finder: files · grep · dirs · recent · git changes · dashboard |
+| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `:dash` | finder: files · grep · dirs · recent · git changes · projects · dashboard |
 
 | viewer (`⏎` on a file) | |
 |---|---|
@@ -165,7 +198,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 
 | finder | |
 |---|---|
-| `⇥` `⇧⇥` | cycle Files / Dirs / Grep / Recent / Git |
+| `⇥` `⇧⇥` | cycle Files / Dirs / Grep / Recent / Git / Dash / Projects |
 | `^o` | reveal the selection in the explorer |
 | `^space` | mark files or grep hits (each hit keeps its line); `⏎` opens them all, `^s` sends them |
 | `^r` | root: cwd → repository root → parent |
@@ -194,7 +227,7 @@ tints blend into `background` from herdr's `[theme.custom]` (default
 
 ```sh
 herdr-oil [DIR|FILE]          # explore (FILE: its dir, cursor on it)
-herdr-oil --finder | --grep | --recent | --git
+herdr-oil --finder | --grep | --recent | --git | --projects
 herdr-oil --pick              # print chosen file(s) instead of opening
 ```
 
@@ -210,7 +243,7 @@ Layout: `buffer.rs` (lines with hidden ids) · `vim.rs` (modal editing) ·
 `apply.rs` (staged execution) · `archive.rs` (`:extract` / `:zip`) ·
 `entry.rs` (listing, git status) · `git.rs` (staging, log, show) ·
 `diff.rs` (unified diff parser, word diff, rows) · `diffview.rs` (diff view) ·
-`finder.rs` (nucleo + ignore + rg) · `preview.rs` (bat/ANSI, worker thread) ·
+`finder.rs` (nucleo + ignore + rg) · `projects.rs` (index, hop, herdr workspaces) · `preview.rs` (bat/ANSI, worker thread) ·
 `open.rs` (editor hand-off) · `launch.rs` (herdr CLI) · `ui.rs` · `app.rs`.
 
 ## Project page

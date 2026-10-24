@@ -11,6 +11,7 @@ use crate::finder::{self, Finder};
 use crate::open::{self, Outcome};
 use crate::plan::{self, Plan};
 use crate::preview;
+use crate::projects;
 use crate::theme::Theme;
 use crate::vim::{Action, FinderKind, Mode, PathKind, Reg, Vim};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -126,6 +127,8 @@ pub struct App {
     pub viewer_cache: preview::Cache,
     pub preview_scroll: usize,
     pub quit: bool,
+    /// Projects tab: `^k` was pressed once on this project.
+    close_armed: Option<PathBuf>,
     pub pick: bool,
     pub picked: Vec<PathBuf>,
     suspend: Option<Vec<String>>,
@@ -328,6 +331,7 @@ impl App {
             preview_scroll: 0,
             quit: false,
             pick,
+            close_armed: None,
             picked: vec![],
             suspend: None,
             edit_file: None,
@@ -371,6 +375,10 @@ impl App {
             }
             "git" | "changes" => {
                 app.open_finder(FinderKind::Git);
+                app.finder_only = true;
+            }
+            "projects" | "hop" => {
+                app.open_finder(FinderKind::Projects);
                 app.finder_only = true;
             }
             _ => {}
@@ -1745,6 +1753,9 @@ impl App {
                 _ => {}
             }
         }
+        if self.transfer.is_none() && self.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) && self.project_key(k) {
+            return;
+        }
         let Some(f) = self.finder.as_mut() else { return };
         let mut open_how: Option<OpenTarget> = None;
         let mut edited = None;
@@ -1758,7 +1769,7 @@ impl App {
                 return;
             }
             (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
-                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git, FinderKind::Dash];
+                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git, FinderKind::Dash, FinderKind::Projects];
                 let i = order.iter().position(|x| *x == f.kind).unwrap_or(0);
                 let n = if k.code == KeyCode::BackTab { (i + order.len() - 1) % order.len() } else { (i + 1) % order.len() };
                 if order[n] == FinderKind::Dash {
@@ -1932,6 +1943,150 @@ impl App {
                 }
                 self.open_files(files, marked[0].line, how);
             }
+        }
+    }
+
+    /// Projects tab keys; false when the generic finder keys should handle
+    /// it (typing, moving, ^y ^g ^s, ⇥, esc).
+    fn project_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let Some(f) = self.finder.as_mut() else { return false };
+        let settings = f.proj_settings.clone();
+        let sel = f.selected().and_then(|it| it.proj);
+        let query = f.query.trim().to_string();
+        // a pending ^k confirmation lasts one key
+        let armed = self.close_armed.take();
+        if k.code == KeyCode::Char('k') && ctrl {
+            self.close_armed = armed;
+        }
+        match (k.code, ctrl, alt) {
+            (KeyCode::Enter, _, _) | (KeyCode::Char('t'), true, _) => {
+                let Some(p) = sel else {
+                    // nothing matches: ⏎ on a fresh name offers ^n
+                    if !query.is_empty() {
+                        self.flash(format!("no project matches — ^n creates {}", finder::tilde(&settings.default_root.join(query.replace(' ', "-")))), MsgKind::Info);
+                    }
+                    return true;
+                };
+                if self.pick {
+                    self.picked = vec![p.path];
+                    self.quit = true;
+                    return true;
+                }
+                self.hop(&p, k.code != KeyCode::Enter);
+            }
+            (KeyCode::Char('o'), true, _) => {
+                if let Some(p) = sel {
+                    projects::bump_recent(&settings.recent_file, &p.path);
+                    self.goto(&p.path, None);
+                    self.view = View::Explorer;
+                    self.finder_only = false;
+                }
+            }
+            (KeyCode::Char('f'), true, _) | (KeyCode::Char('g'), _, true) => {
+                if let Some(p) = sel {
+                    projects::bump_recent(&settings.recent_file, &p.path);
+                    let kind = if k.code == KeyCode::Char('f') { FinderKind::Files } else { FinderKind::Grep };
+                    f.query.clear();
+                    f.qcur = 0;
+                    f.set_kind(kind);
+                    f.set_root(p.path);
+                    self.preview_scroll = 0;
+                }
+            }
+            (KeyCode::Char('a'), true, _) => {
+                f.cycle_scope();
+                self.preview.invalidate();
+            }
+            (KeyCode::Char('x'), true, _) => {
+                match sel.filter(|p| p.hopped.is_some()) {
+                    Some(p) => {
+                        projects::forget_recent(&settings.recent_file, &p.path);
+                        f.restart();
+                        self.flash(format!("forgot {} (still listed under all)", p.name), MsgKind::Info);
+                    }
+                    None => self.flash("not a recent project", MsgKind::Info),
+                }
+            }
+            (KeyCode::Char('k'), true, _) => match sel.as_ref().and_then(|p| p.ws.as_ref().map(|w| (p, w))) {
+                // closing kills its panes (agents too): ^k twice
+                Some((p, ws)) if self.close_armed.as_ref() != Some(&p.path) => {
+                    match projects::close_target(ws) {
+                        Some((what, _)) => {
+                            let agents = if ws.agents > 0 { format!(" and its {} agent(s)", ws.agents) } else { String::new() };
+                            self.flash(format!("^k again closes the {what} of {}{agents}", p.name), MsgKind::Warn);
+                            self.close_armed = Some(p.path.clone());
+                        }
+                        None => self.flash("other projects share its workspace and tab — close it in herdr", MsgKind::Info),
+                    }
+                    return true;
+                }
+                Some((p, ws)) => match projects::close(ws) {
+                    Ok(what) => {
+                        let s = f.sel;
+                        f.restart();
+                        f.sel = s;
+                        self.preview.invalidate();
+                        self.flash(format!("closed the {what} of {}", p.name), MsgKind::Ok);
+                    }
+                    Err(e) => self.flash(format!("close: {e}"), MsgKind::Err),
+                },
+                None => self.flash("no workspace open on this project", MsgKind::Info),
+            },
+            (KeyCode::Char('n'), true, _) => {
+                let q = query;
+                if q.is_empty() {
+                    self.flash(format!("type the new project's name first, then ^n (created in {})", finder::tilde(&settings.default_root)), MsgKind::Warn);
+                    return true;
+                }
+                match projects::create(&q, &settings) {
+                    Ok(path) => {
+                        let all = projects::index(&settings);
+                        let row = projects::Proj {
+                            name: projects::display_name(&path, &settings.roots),
+                            label: projects::label(&path, &all),
+                            hopped: None,
+                            icon: projects::icon(&path),
+                            head: projects::head(&path),
+                            ws: None,
+                            here: false,
+                            dirty: None,
+                            path,
+                        };
+                        if self.pick {
+                            self.picked = vec![row.path];
+                            self.quit = true;
+                        } else {
+                            self.hop(&row, false);
+                        }
+                    }
+                    Err(e) => self.flash(e, MsgKind::Err),
+                }
+            }
+            (KeyCode::Char('v' | 'e' | ' '), true, _) => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// Hop to a project as a herdr workspace (or a tab) and close the popup.
+    fn hop(&mut self, p: &projects::Proj, tab: bool) {
+        if !crate::launch::in_herdr() {
+            self.flash("not inside herdr — ^o explores the project here instead", MsgKind::Warn);
+            return;
+        }
+        let settings = match self.finder.as_ref() {
+            Some(f) => f.proj_settings.clone(),
+            None => self.cfg.projects.clone(),
+        };
+        match projects::hop(&p.path, tab, p.ws.as_ref(), &p.label, &settings) {
+            Ok(m) if self.modified_dirs().is_empty() => {
+                self.flash(m, MsgKind::Ok);
+                self.quit = true;
+            }
+            Ok(m) => self.flash(format!("{m} — unsaved edits keep the explorer open"), MsgKind::Warn),
+            Err(e) => self.flash(format!("hop: {e}"), MsgKind::Err),
         }
     }
 
