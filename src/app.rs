@@ -63,7 +63,8 @@ pub enum Overlay {
     None,
     /// `undo`: the plan rolls back the last apply (deletes always go to Trash).
     Confirm { plan: Plan, scroll: usize, then_quit: bool, undo: bool },
-    Help { scroll: usize },
+    /// `query` filters the rows (`/` starts typing it).
+    Help { scroll: usize, query: String, typing: bool },
     QuitPrompt,
     Report { title: String, lines: Vec<String>, error: bool, scroll: usize },
 }
@@ -152,20 +153,40 @@ fn chmod_nofollow(p: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let f = match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p) {
         Ok(f) => f,
-        // unreadable (e.g. mode 000): fall back to a fresh lstat check
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let m = std::fs::symlink_metadata(p)?;
-            if !(m.is_file() || m.is_dir()) {
-                return Err(std::io::Error::other("not a regular file or directory"));
-            }
-            return std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
-        }
+        // unreadable (e.g. mode 000): stat and chmod relative to the parent
+        // directory without following the last component
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return chmodat_nofollow(p, mode),
         Err(e) => return Err(e),
     };
     if !(f.metadata()?.is_file() || f.metadata()?.is_dir()) {
         return Err(std::io::Error::other("not a regular file or directory"));
     }
     f.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+/// `fstatat` + `fchmodat(AT_SYMLINK_NOFOLLOW)` against a directory handle,
+/// so neither a swapped last component nor a swapped parent is followed.
+fn chmodat_nofollow(p: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let not_ok = || std::io::Error::other("not a regular file or directory");
+    let (Some(parent), Some(name)) = (p.parent(), p.file_name()) else { return Err(not_ok()) };
+    let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+    let dir = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent)?;
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| not_ok())?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let kind = st.st_mode & libc::S_IFMT;
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return Err(not_ok());
+    }
+    if unsafe { libc::fchmodat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// `:chmod` spec on a mode: octal (`755`) or `[ugoa]*[+-=][rwx]+` (`+x`, `go-w`).
@@ -375,8 +396,10 @@ impl App {
     fn execute(&mut self, plan: Plan, then_quit: bool, undo: bool) {
         let method = if undo { crate::config::DeleteMethod::Trash } else { self.cfg.delete };
         let rep = apply::apply(&plan.ops, method);
-        if !rep.undo.is_empty() {
-            self.last_batch = Some(rep.undo.clone());
+        // any landed change makes the previous journal stale, even when this
+        // batch has nothing to undo (permanent deletes only)
+        if rep.done > 0 {
+            self.last_batch = (!rep.undo.is_empty()).then(|| rep.undo.clone());
         }
         let focus = rep.landed.iter().find(|p| p.parent() == Some(self.cwd.as_path())).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let focus = focus.or_else(|| self.buf().cur().name(&self.store).split('/').next().map(str::to_string));
@@ -384,6 +407,7 @@ impl App {
         if rep.errors.is_empty() {
             let msg = match (undo, rep.permanent) {
                 (true, _) => format!("undid {} change(s) — U redoes", plan.ops.len()),
+                (false, _) if rep.undo.is_empty() => format!("applied {} change(s) — permanent, nothing to undo", plan.ops.len()),
                 (false, 0) => format!("applied {} change(s) — U undoes", plan.ops.len()),
                 (false, n) => format!("applied {} change(s) — U undoes all but {n} permanent delete(s)", plan.ops.len()),
             };
@@ -654,7 +678,7 @@ impl App {
                 self.details = (self.details + 1) % 3;
                 self.flash(["details off", "sizes", "perms · size · age"][self.details as usize], MsgKind::Info);
             }
-            Action::Help => self.overlay = Overlay::Help { scroll: 0 },
+            Action::Help => self.overlay = Overlay::Help { scroll: 0, query: String::new(), typing: false },
             Action::Save => self.save(false),
             Action::SaveQuit => self.save(true),
             Action::Quit => self.try_quit(false),
@@ -964,23 +988,36 @@ impl App {
                 KeyCode::Char('c') | KeyCode::Esc | KeyCode::Char('n') => {}
                 _ => self.overlay = Overlay::QuitPrompt,
             },
-            Overlay::Help { mut scroll } => match k.code {
+            Overlay::Help { mut query, typing: true, .. } => {
+                match k.code {
+                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => query.push(c),
+                    KeyCode::Backspace => {
+                        query.pop();
+                    }
+                    KeyCode::Esc => query.clear(),
+                    _ => {}
+                }
+                let typing = !matches!(k.code, KeyCode::Enter | KeyCode::Esc);
+                self.overlay = Overlay::Help { scroll: 0, query, typing };
+            }
+            Overlay::Help { mut scroll, query, typing } => match k.code {
                 KeyCode::Char('j') | KeyCode::Down => {
                     scroll += 1;
-                    self.overlay = Overlay::Help { scroll };
+                    self.overlay = Overlay::Help { scroll, query, typing };
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
                     scroll = scroll.saturating_sub(1);
-                    self.overlay = Overlay::Help { scroll };
+                    self.overlay = Overlay::Help { scroll, query, typing };
                 }
                 KeyCode::PageDown | KeyCode::Char(' ') => {
                     scroll += 10;
-                    self.overlay = Overlay::Help { scroll };
+                    self.overlay = Overlay::Help { scroll, query, typing };
                 }
                 KeyCode::PageUp => {
                     scroll = scroll.saturating_sub(10);
-                    self.overlay = Overlay::Help { scroll };
+                    self.overlay = Overlay::Help { scroll, query, typing };
                 }
+                KeyCode::Char('/') => self.overlay = Overlay::Help { scroll: 0, query: String::new(), typing: true },
                 _ => {}
             },
             Overlay::Report { title, lines, error, mut scroll } => match k.code {
@@ -1084,7 +1121,7 @@ impl App {
                 let paths: Vec<(PathBuf, Option<usize>)> = if f.marked.is_empty() {
                     f.selected().map(|it| (it.abs, it.line)).into_iter().collect()
                 } else {
-                    f.marked.iter().map(|p| (p.clone(), None)).collect()
+                    f.marked.iter().map(|m| (m.path.clone(), m.line)).collect()
                 };
                 self.send_paths(paths);
                 return;
@@ -1168,8 +1205,18 @@ impl App {
                 self.finder_only = false;
                 return;
             }
-            let files = if marked.is_empty() { vec![it.abs.clone()] } else { marked };
-            self.open_files(files, it.line, how);
+            if marked.is_empty() {
+                self.open_files(vec![it.abs.clone()], it.line, how);
+            } else {
+                // each file once, in mark order; the first mark's line leads
+                let mut files: Vec<PathBuf> = Vec::new();
+                for m in &marked {
+                    if !files.contains(&m.path) {
+                        files.push(m.path.clone());
+                    }
+                }
+                self.open_files(files, marked[0].line, how);
+            }
         }
     }
 
@@ -1636,5 +1683,28 @@ mod tests {
         std::fs::set_permissions(t.0.join("b.txt"), std::fs::Permissions::from_mode(0o000)).unwrap();
         chmod_nofollow(&t.0.join("b.txt"), 0o644).unwrap();
         assert_eq!(std::fs::metadata(t.0.join("b.txt")).unwrap().permissions().mode() & 0o777, 0o644);
+    }
+
+    #[test]
+    fn apply_without_undo_clears_journal() {
+        use crate::plan::Op;
+        let (t, mut app) = app_in("journal");
+        app.cfg.delete = crate::config::DeleteMethod::Permanent;
+        let mv = Op::Move { src: t.0.join("a.txt"), dst: t.0.join("c.txt"), dir: false };
+        app.execute(Plan { ops: vec![mv], errors: vec![] }, false, false);
+        assert!(app.last_batch.is_some());
+        let del = Op::Delete { src: t.0.join("b.txt"), dir: false };
+        app.execute(Plan { ops: vec![del], errors: vec![] }, false, false);
+        assert!(app.last_batch.is_none());
+    }
+
+    #[test]
+    fn help_filter_narrows_rows() {
+        let all: usize = crate::ui::help_rows("").iter().map(|(_, r)| r.len()).sum();
+        let some = crate::ui::help_rows("chmod");
+        let n: usize = some.iter().map(|(_, r)| r.len()).sum();
+        assert!(n > 0 && n < all);
+        assert!(some.iter().all(|(_, r)| r.iter().all(|(k, v)| (k.to_string() + v).to_lowercase().contains("chmod"))));
+        assert!(crate::ui::help_rows("zzzz-nothing").is_empty());
     }
 }

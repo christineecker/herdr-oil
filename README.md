@@ -87,7 +87,8 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 
 ## Keys
 
-`g?` in the popup shows everything. Highlights:
+`g?` in the popup shows everything; `/` there filters the list (`/chmod`,
+`/send`, `/git`). Highlights:
 
 | explorer | |
 |---|---|
@@ -95,7 +96,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:w` `^s` `ZZ` | review & apply · apply and quit |
 | `q` `esc` | close (asks first when edits are unsaved; esc cancels a pending key first) |
 | `u` `^r` `.` | undo · redo (per directory) · repeat the last change |
-| `U` `:undo-apply` | roll back the last `:w` (moves go home, Trash comes back, new entries go to Trash); `U` again redoes. Permanent deletes can't come back |
+| `U` `:undo-apply` | roll back the last `:w` (moves go home, Trash comes back, new entries go to Trash); `U` again redoes. Permanent deletes can't come back, and an apply that only deleted permanently leaves nothing to undo |
 | `ge` `:edit-buffer` | edit the listing in `$EDITOR` (`/001 name` tags keep identity, like oil.nvim); back in the explorer with the edits staged |
 | `gi` `:'<,'>send` | type the path(s) into the origin pane, no Enter (`@path` for agents, quoted for shells) |
 | `H` `L` | back · forward through visited folders |
@@ -121,11 +122,12 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 
 | finder | |
 |---|---|
-| `⇥` `⇧⇥` | cycle Files / Dirs / Grep / Recent |
+| `⇥` `⇧⇥` | cycle Files / Dirs / Grep / Recent / Git |
 | `^o` | reveal the selection in the explorer |
-| `^space` | mark several files, `⏎` opens them all |
+| `^space` | mark files or grep hits (each hit keeps its line); `⏎` opens them all, `^s` sends them |
 | `^r` | root: cwd → repository root → parent |
 | `alt-h` `alt-i` `alt-p` | hidden · ignored · preview |
+| `^y` `^g` | copy path · system opener |
 | `foo -- *.rs -t py -T md` | grep: limit to globs / ripgrep file types |
 | `^s` | send the selection (or marked files, grep hits with `:line`) to the origin pane |
 

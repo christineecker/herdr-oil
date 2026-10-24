@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match &app.overlay {
         Overlay::None => {}
         Overlay::Confirm { .. } => draw_confirm(f, app, area),
-        Overlay::Help { scroll } => draw_help(f, app, area, *scroll),
+        Overlay::Help { scroll, query, typing } => draw_help(f, app, area, *scroll, query, *typing),
         Overlay::QuitPrompt => draw_quit(f, app, area),
         Overlay::Report { title, lines, error, scroll } => draw_report(f, &app.th, area, title, lines, *error, *scroll),
     }
@@ -675,7 +675,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
             if is_sel { "▌" } else { " " },
             Style::default().fg(th.accent),
         )];
-        sp.push(Span::styled(if marked.contains(&it.abs) { "●" } else { " " }, Style::default().fg(th.peach)));
+        sp.push(Span::styled(if marked.iter().any(|m| m.path == it.abs && m.line == it.line) { "●" } else { " " }, Style::default().fg(th.peach)));
         if let Some(g) = it.git {
             let gcol = match g {
                 'M' | 'R' => th.yellow,
@@ -1094,6 +1094,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("g.  gs  gS  gd", "hidden · cycle sort · reverse · sizes → details → off"),
         ("^p", "toggle preview (^f/^b scroll it)"),
         ("^l  :e!", "refresh · discard edits here"),
+        ("g?  then /", "this help · type to filter it"),
         ("q  esc  ZZ  ZQ", "quit (asks if unsaved) · apply+quit · discard+quit"),
     ]),
     ("Viewer (⏎ on a file)", &[
@@ -1118,7 +1119,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("V.. :s  I  A", "same on a selection · prefix · suffix the names"),
         (":prefix x  :suffix x", "prepend · append before the extension"),
         ("name -> target", "symlink: edit the target to relink, new line creates"),
-        ("U", "undo the last apply (U again redoes)"),
+        ("U  :undo-apply", "undo the last apply (U again redoes)"),
         (":chmod +x  :%chmod 644", "change permissions (applies at once)"),
         (":w  ^s", "review & apply all pending changes"),
         (":touch a b  :mkdir d", "add entries quickly"),
@@ -1136,10 +1137,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("type", "fuzzy query ('exact ^prefix suffix$ !not)"),
         ("foo -- *.rs  -t py", "grep: only these globs / file types"),
         ("⇥ ⇧⇥", "cycle Files / Dirs / Grep / Recent / Git"),
-        ("^s", "send selection / marked to the origin pane"),
+        ("^s", "send selection / marked (with :line) to the origin pane"),
         ("⏎ ^v ^x ^t ^e", "open (default · split · below · tab · popup)"),
         ("^o", "reveal in explorer"),
-        ("^space", "mark several files, ⏎ opens all"),
+        ("^space", "mark files / grep hits (line kept), ⏎ opens all"),
         ("^r", "root: cwd ⇄ repository ⇄ parent"),
         ("alt-h alt-i", "toggle hidden · ignored files"),
         ("^y", "copy path"),
@@ -1147,19 +1148,45 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-fn draw_help(f: &mut Frame, app: &App, area: Rect, scroll: usize) {
+/// Help rows matching `query` (case-insensitive, in key, text or section
+/// title); a matching section keeps all its rows.
+pub fn help_rows(query: &str) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let q = query.to_lowercase();
+    let hit = |t: &str| t.to_lowercase().contains(&q);
+    HELP.iter()
+        .filter_map(|(sec, rows)| {
+            let rows: Vec<_> = rows.iter().copied().filter(|(k, v)| q.is_empty() || hit(sec) || hit(k) || hit(v)).collect();
+            (!rows.is_empty()).then_some((*sec, rows))
+        })
+        .collect()
+}
+
+fn draw_help(f: &mut Frame, app: &App, area: Rect, scroll: usize, query: &str, typing: bool) {
     let th = &app.th;
     let mut lines = Vec::new();
-    for (sec, rows) in HELP {
+    if typing || !query.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" /", Style::default().fg(th.accent)),
+            Span::styled(query.to_string(), Style::default().fg(th.text)),
+            Span::styled(if typing { "▏" } else { "" }, Style::default().fg(th.accent)),
+        ]));
+        lines.push(Line::raw(""));
+    }
+    let sections = help_rows(query);
+    if sections.is_empty() {
+        lines.push(Line::styled("   no key matches", Style::default().fg(th.dim)));
+    }
+    for (sec, rows) in sections {
         lines.push(Line::styled(format!(" {sec}"), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)));
-        for (k, v) in *rows {
+        for (k, v) in rows {
             lines.push(Line::from(vec![Span::styled(format!("   {k:<24}"), Style::default().fg(th.yellow)), Span::styled(v.to_string(), Style::default().fg(th.text))]));
         }
         lines.push(Line::raw(""));
     }
     let r = centered(area, 78, area.height.saturating_sub(2));
     f.render_widget(Clear, r);
-    let blk = frame(th, "herdr-oil keys  (j/k scroll · any key closes)", th.accent);
+    let title = if typing { "herdr-oil keys  (type to filter · ⏎ done · esc clear)" } else { "herdr-oil keys  (/ filter · j/k scroll · any key closes)" };
+    let blk = frame(th, title, th.accent);
     let inner = blk.inner(r);
     f.render_widget(blk, r);
     let max = lines.len().saturating_sub(inner.height as usize);

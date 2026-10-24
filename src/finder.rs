@@ -18,6 +18,14 @@ pub struct Hit {
     pub text: String,
 }
 
+/// A marked finder entry: grep hits keep their line, so several hits in
+/// one file stay distinct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mark {
+    pub path: PathBuf,
+    pub line: Option<usize>,
+}
+
 pub struct Item {
     pub display: String,
     pub abs: PathBuf,
@@ -39,7 +47,7 @@ pub struct Finder {
     pub scroll: usize,
     pub hidden: bool,
     pub no_ignore: bool,
-    pub marked: Vec<PathBuf>,
+    pub marked: Vec<Mark>,
     max_files: usize,
     nucleo: Nucleo<String>,
     matcher: Matcher,
@@ -505,10 +513,11 @@ impl Finder {
             if it.is_dir {
                 return;
             }
-            if let Some(i) = self.marked.iter().position(|p| *p == it.abs) {
+            let m = Mark { path: it.abs, line: it.line };
+            if let Some(i) = self.marked.iter().position(|x| *x == m) {
                 self.marked.remove(i);
             } else {
-                self.marked.push(it.abs);
+                self.marked.push(m);
             }
         }
     }
