@@ -9,6 +9,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FinderKind {
+    /// Files and folders from one walk; an empty query shows the Dash rows.
+    /// The default source: a sigil typed first switches to another one.
+    All,
     Files,
     Dirs,
     Grep,
@@ -20,6 +23,58 @@ pub enum FinderKind {
     /// Projects under the configured roots (herdr-hop's), hopped to as
     /// herdr workspaces.
     Projects,
+}
+
+impl FinderKind {
+    /// The source a first query character switches to from All. None of
+    /// these start an fzf term (`'` `^` `!` `$` `|` do).
+    pub fn from_sigil(c: char) -> Option<FinderKind> {
+        Some(match c {
+            '/' => FinderKind::Grep,
+            '@' => FinderKind::Projects,
+            '+' => FinderKind::Git,
+            '<' => FinderKind::Recent,
+            _ => return None,
+        })
+    }
+
+    pub fn sigil(self) -> Option<char> {
+        Some(match self {
+            FinderKind::Grep => '/',
+            FinderKind::Projects => '@',
+            FinderKind::Git => '+',
+            FinderKind::Recent => '<',
+            _ => return None,
+        })
+    }
+
+    /// The finder's ␣ menu (and the explorer's ␣ keys): letter → source.
+    pub fn from_leader(c: char) -> Option<FinderKind> {
+        Some(match c {
+            'a' | ' ' => FinderKind::All,
+            'f' => FinderKind::Files,
+            'g' | '/' => FinderKind::Grep,
+            'd' => FinderKind::Dirs,
+            'r' => FinderKind::Recent,
+            's' => FinderKind::Git,
+            'p' => FinderKind::Projects,
+            'h' => FinderKind::Dash,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FinderKind::All => "All",
+            FinderKind::Files => "Files",
+            FinderKind::Dirs => "Folders",
+            FinderKind::Grep => "Grep",
+            FinderKind::Recent => "Recent",
+            FinderKind::Git => "Changes",
+            FinderKind::Dash => "Dash",
+            FinderKind::Projects => "Projects",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -718,6 +773,7 @@ impl Vim {
             "send" => Action::Send(b.cur().id.into_iter().collect()),
             "details" => Action::ToggleDetails,
             "preview" => Action::TogglePreview,
+            "find" | "all" => Action::Finder(FinderKind::All),
             "files" => Action::Finder(FinderKind::Files),
             "grep" | "rg" => Action::Finder(FinderKind::Grep),
             "dash" | "dashboard" => Action::Finder(FinderKind::Dash),
@@ -1034,7 +1090,7 @@ impl Vim {
             }
             KeyCode::Tab => {
                 self.pending.clear();
-                return Action::Finder(FinderKind::Files);
+                return Action::Finder(FinderKind::All);
             }
             KeyCode::Up => 'k',
             KeyCode::Down => 'j',
@@ -1164,14 +1220,9 @@ impl Vim {
             }
             ' ' => {
                 let Some(&d) = keys.get(i) else { return Parse::More };
-                *act = match d {
-                    'f' | ' ' => Action::Finder(FinderKind::Files),
-                    'g' | '/' => Action::Finder(FinderKind::Grep),
-                    'd' => Action::Finder(FinderKind::Dirs),
-                    'r' => Action::Finder(FinderKind::Recent),
-                    's' => Action::Finder(FinderKind::Git),
-                    'p' => Action::Finder(FinderKind::Projects),
-                    _ => return Parse::Bad,
+                *act = match FinderKind::from_leader(d) {
+                    Some(k) => Action::Finder(k),
+                    None => return Parse::Bad,
                 };
                 Parse::Done
             }
@@ -1587,7 +1638,7 @@ impl Vim {
 
 /// Ex command names offered by `<Tab>` completion.
 const EX_COMMANDS: &[&str] = &[
-    "cd", "changed", "chmod", "dash", "details", "diff", "edit", "edit-buffer", "extract", "files", "grep", "help", "hidden", "history", "log", "marks", "mkdir", "noh", "parent", "plan", "plan-copy", "prefix", "preview", "projects", "pwd", "quit", "recipe", "restore", "reverse", "send", "sort", "stage", "suffix", "tar", "touch", "undo-apply", "unstage", "write", "zip",
+    "cd", "changed", "chmod", "dash", "details", "diff", "edit", "edit-buffer", "extract", "files", "find", "grep", "help", "hidden", "history", "log", "marks", "mkdir", "noh", "parent", "plan", "plan-copy", "prefix", "preview", "projects", "pwd", "quit", "recipe", "restore", "reverse", "send", "sort", "stage", "suffix", "tar", "touch", "undo-apply", "unstage", "write", "zip",
 ];
 
 /// A parsed `s/pat/rep/flags`.
@@ -2104,6 +2155,8 @@ mod tests {
         assert_eq!(keys(&mut v, &mut b, ":w\n"), [Action::Save]);
         assert_eq!(keys(&mut v, &mut b, ":wq\n"), [Action::SaveQuit]);
         assert_eq!(keys(&mut v, &mut b, " f"), [Action::Finder(FinderKind::Files)]);
+        assert_eq!(keys(&mut v, &mut b, "  "), [Action::Finder(FinderKind::All)]);
+        assert_eq!(keys(&mut v, &mut b, " h"), [Action::Finder(FinderKind::Dash)]);
         assert_eq!(keys(&mut v, &mut b, "\n"), [Action::Open(None)]);
         keys(&mut v, &mut b, ":touch x y/\n");
         assert_eq!(b.lines.len(), 3);

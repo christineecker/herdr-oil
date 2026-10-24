@@ -114,6 +114,8 @@ pub struct App {
     pub details: u8,
     pub preview_on: bool,
     pub finder_preview: bool,
+    /// The finder's ␣ menu (pick a source) is open.
+    pub finder_menu: bool,
     pub view: View,
     pub finder: Option<Finder>,
     /// Finder opened on its own (launch mode) — Esc quits instead of going back.
@@ -318,6 +320,7 @@ impl App {
             details: cfg.details,
             preview_on: cfg.preview,
             finder_preview: true,
+            finder_menu: false,
             view: View::Explorer,
             finder: None,
             finder_only: false,
@@ -361,8 +364,16 @@ impl App {
         app.vim.recipes = app.cfg.recipes.clone();
         app.goto(&dir, focus.as_deref());
         match mode {
-            "finder" | "files" => {
+            "finder" => {
+                app.open_finder(FinderKind::All);
+                app.finder_only = true;
+            }
+            "files" => {
                 app.open_finder(FinderKind::Files);
+                app.finder_only = true;
+            }
+            "dash" => {
+                app.open_finder(FinderKind::Dash);
                 app.finder_only = true;
             }
             "grep" => {
@@ -685,7 +696,8 @@ impl App {
     }
 
     fn open_finder(&mut self, k: FinderKind) {
-        if k == FinderKind::Dash {
+        self.finder_menu = false;
+        if matches!(k, FinderKind::Dash | FinderKind::All) {
             let pending = self.pending_tags();
             let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, self.cwd.clone(), &self.cfg));
             f.pending = pending;
@@ -695,6 +707,18 @@ impl App {
             _ => self.finder = Some(Finder::new(k, self.cwd.clone(), &self.cfg)),
         }
         self.view = View::Finder;
+        self.preview_scroll = 0;
+    }
+
+    /// Switch the open finder's source (␣ menu, ⌫ back to All); the query stays.
+    fn finder_switch(&mut self, k: FinderKind) {
+        let pending = matches!(k, FinderKind::Dash | FinderKind::All).then(|| self.pending_tags());
+        if let Some(f) = self.finder.as_mut() {
+            if let Some(p) = pending {
+                f.pending = p;
+            }
+            f.set_kind(k);
+        }
         self.preview_scroll = 0;
     }
 
@@ -1362,6 +1386,9 @@ impl App {
                 let sel = f.sel;
                 f.restart();
                 f.sel = sel;
+            } else {
+                // only the Dash rows; the walk stays
+                f.refresh_zero();
             }
         }
         self.preview.invalidate();
@@ -1755,9 +1782,26 @@ impl App {
                     }
                     return;
                 }
+                (KeyCode::Tab | KeyCode::BackTab, _) => {
+                    f.set_kind(if f.kind == FinderKind::Dirs { FinderKind::Files } else { FinderKind::Dirs });
+                    self.preview_scroll = 0;
+                    return;
+                }
                 (KeyCode::Char('v' | 'x' | 't' | 'e' | 'g' | 'o' | 'y' | 's' | ' '), true) => return,
                 _ => {}
             }
+        } else if self.finder_menu {
+            // ␣ menu: a letter picks the source, anything else closes it
+            self.finder_menu = false;
+            if let (KeyCode::Char(c), false, false) = (k.code, ctrl, alt) {
+                if let Some(kind) = FinderKind::from_leader(c) {
+                    self.finder_switch(kind);
+                }
+            }
+            return;
+        } else if matches!((k.code, ctrl, alt), (KeyCode::Char(' ' | '?'), false, false)) && self.finder.as_ref().is_some_and(|f| f.query.is_empty()) {
+            self.finder_menu = true;
+            return;
         }
         if self.transfer.is_none() && self.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) && self.project_key(k) {
             return;
@@ -1775,18 +1819,7 @@ impl App {
                 return;
             }
             (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
-                let order = [FinderKind::Files, FinderKind::Dirs, FinderKind::Grep, FinderKind::Recent, FinderKind::Git, FinderKind::Dash, FinderKind::Projects];
-                let i = order.iter().position(|x| *x == f.kind).unwrap_or(0);
-                let n = if k.code == KeyCode::BackTab { (i + order.len() - 1) % order.len() } else { (i + 1) % order.len() };
-                if order[n] == FinderKind::Dash {
-                    let pending = self.pending_tags();
-                    if let Some(f) = self.finder.as_mut() {
-                        f.pending = pending;
-                    }
-                }
-                if let Some(f) = self.finder.as_mut() {
-                    f.set_kind(order[n]);
-                }
+                f.jump_group(if k.code == KeyCode::BackTab { -1 } else { 1 });
                 self.preview_scroll = 0;
                 return;
             }
@@ -1909,6 +1942,10 @@ impl App {
             (KeyCode::Char('f'), true, _) => self.preview_scroll += 10,
             (KeyCode::Char('b'), true, _) => self.preview_scroll = self.preview_scroll.saturating_sub(10),
             (KeyCode::Char('p'), _, true) | (KeyCode::Char('l'), true, _) => self.finder_preview = !self.finder_preview,
+            (KeyCode::Backspace, false, false) if f.query.is_empty() && f.kind != FinderKind::All => {
+                self.finder_switch(FinderKind::All);
+                return;
+            }
             (KeyCode::Backspace, false, false) if f.query.is_empty() && !self.finder_only => {
                 self.view = View::Explorer;
                 return;
@@ -1920,7 +1957,9 @@ impl App {
             }
         }
         if let Some(appended) = edited {
-            f.query_changed(appended);
+            if !f.take_sigil() {
+                f.query_changed(appended);
+            }
             self.preview_scroll = 0;
         }
         if let Some(how) = open_how {
@@ -2444,6 +2483,33 @@ mod tests {
         let cfg = Config { git_status: false, state_dir: t.0.join(".state"), ..Config::default() };
         let app = App::new(t.0.clone(), "explorer", cfg, false);
         (t, app)
+    }
+
+    #[test]
+    fn finder_sigils_backspace_and_menu() {
+        let (_t, mut app) = app_in("app-omnibar");
+        let key = |app: &mut App, c: KeyCode| app.finder_key(KeyEvent::new(c, KeyModifiers::NONE));
+        app.act(Action::Finder(FinderKind::All));
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::All);
+        // a sigil typed first switches source and is not kept in the query
+        key(&mut app, KeyCode::Char('/'));
+        key(&mut app, KeyCode::Char('x'));
+        let f = app.finder.as_ref().unwrap();
+        assert_eq!((f.kind, f.query.as_str()), (FinderKind::Grep, "x"));
+        // ⌫ edits, then on the empty query goes back to All, then to the explorer
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::All);
+        assert_eq!(app.view, View::Finder);
+        // ␣ on the empty query: the menu; a letter picks
+        key(&mut app, KeyCode::Char(' '));
+        assert!(app.finder_menu);
+        key(&mut app, KeyCode::Char('p'));
+        assert!(!app.finder_menu);
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::Projects);
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
+        assert_eq!(app.view, View::Explorer);
     }
 
     fn row_of(app: &App, name: &str) -> usize {

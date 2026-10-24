@@ -40,8 +40,8 @@ command = ["./target/release/herdr-oil", "--launch", "explorer"]
 
 [[actions]]
 id = "finder"
-title = "Oil: find files…"
-description = "Fuzzy file finder rooted at the focused pane's cwd."
+title = "Oil: find…"
+description = "One prompt for files and folders at the focused pane's cwd; / @ + < switch to grep, projects, changes, recent."
 contexts = ["workspace"]
 command = ["./target/release/herdr-oil", "--launch", "finder"]
 

@@ -1,6 +1,8 @@
 //! Fuzzy finder: files / directories (parallel `ignore` walk into nucleo),
 //! live grep (ripgrep, falling back to grep), recently opened files, and
-//! projects (see [`crate::projects`]).
+//! projects (see [`crate::projects`]). The default source, All, walks files
+//! and folders together and shows the Dash rows while the query is empty;
+//! a sigil typed first (`/` `@` `+` `<`) switches to another source.
 
 use crate::projects::{self, Proj, Scope};
 use crate::vim::FinderKind;
@@ -59,6 +61,8 @@ pub struct Finder {
     pub marked: Vec<Mark>,
     max_files: usize,
     nucleo: Nucleo<String>,
+    /// All: the Dash rows, listed while the query is empty.
+    zero: Nucleo<String>,
     matcher: Matcher,
     walk_cancel: Arc<AtomicBool>,
     walking: Arc<AtomicBool>,
@@ -170,6 +174,7 @@ impl Finder {
             marked: vec![],
             max_files: cfg.max_files,
             nucleo: new_nucleo(&dirty),
+            zero: new_nucleo(&dirty),
             matcher: Matcher::new(NConfig::DEFAULT.match_paths()),
             walk_cancel: Arc::new(AtomicBool::new(false)),
             walking: Arc::new(AtomicBool::new(false)),
@@ -234,10 +239,39 @@ impl Finder {
         self.walking.load(Ordering::Relaxed) || self.grep.running.load(Ordering::Relaxed)
     }
 
+    /// All with an empty query: the Dash rows stand in for the walk.
+    pub fn zero_view(&self) -> bool {
+        self.kind == FinderKind::All && self.query.is_empty()
+    }
+
     pub fn total(&self) -> usize {
         match self.kind {
             FinderKind::Grep => self.grep.hits.lock().map(|h| h.len()).unwrap_or(0),
+            _ if self.zero_view() => self.zero.snapshot().item_count() as usize,
             _ => self.nucleo.snapshot().item_count() as usize,
+        }
+    }
+
+    /// A sigil typed first in All (or Files) switches source: `/foo` greps
+    /// for foo. True when it did.
+    pub fn take_sigil(&mut self) -> bool {
+        if !matches!(self.kind, FinderKind::All | FinderKind::Files) {
+            return false;
+        }
+        let Some(k) = self.query.chars().next().and_then(FinderKind::from_sigil) else { return false };
+        self.query.remove(0);
+        self.qcur = self.qcur.saturating_sub(1);
+        self.set_kind(k);
+        true
+    }
+
+    /// All: list the Dash rows again (pending edits or git state changed).
+    pub fn refresh_zero(&mut self) {
+        if self.kind == FinderKind::All {
+            self.zero = new_nucleo(&self.dirty);
+            let inj = self.zero.injector();
+            self.fill_dash(inj);
+            self.dirty.store(true, Ordering::Relaxed);
         }
     }
 
@@ -270,6 +304,12 @@ impl Finder {
         }
         self.reparse(false);
         match self.kind {
+            FinderKind::All => {
+                self.zero = new_nucleo(&self.dirty);
+                let inj = self.zero.injector();
+                self.fill_dash(inj);
+                self.start_walk();
+            }
             FinderKind::Files | FinderKind::Dirs => self.start_walk(),
             FinderKind::Recent => {
                 let inj = self.nucleo.injector();
@@ -291,7 +331,10 @@ impl Finder {
                 }
                 self.git = changes.map(|v| v.into_iter().map(|(c, p)| (p, c)).collect());
             }
-            FinderKind::Dash => self.fill_dash(),
+            FinderKind::Dash => {
+                let inj = self.nucleo.injector();
+                self.fill_dash(inj);
+            }
             FinderKind::Projects => self.start_projects(),
         }
         self.dirty.store(true, Ordering::Relaxed);
@@ -380,7 +423,7 @@ impl Finder {
 
     /// Dashboard: pending edits, then git changes, marked and recent files,
     /// each path once (the first reason wins).
-    fn fill_dash(&mut self) {
+    fn fill_dash(&mut self, inj: nucleo::Injector<String>) {
         self.dash.clear();
         let mut seen = std::collections::HashSet::new();
         let mut rows: Vec<(String, char, PathBuf)> = Vec::new();
@@ -415,7 +458,6 @@ impl Finder {
                 rows.push((label(&p, &self.root), '◷', p));
             }
         }
-        let inj = self.nucleo.injector();
         for (l, tag, p) in rows {
             inj.push(l.clone(), |s, cols| cols[0] = s.as_str().into());
             self.dash.insert(l, (tag, p));
@@ -430,6 +472,12 @@ impl Finder {
         let walked = self.walked.clone();
         let inj = self.nucleo.injector();
         let root = self.root.clone();
+        // (files, folders) to list
+        let want = match self.kind {
+            FinderKind::Dirs => (false, true),
+            FinderKind::All => (true, true),
+            _ => (true, false),
+        };
         let dirs = self.kind == FinderKind::Dirs;
         let (hidden, no_ignore, cap) = (self.hidden, self.no_ignore, self.max_files);
         let dirty = self.dirty.clone();
@@ -464,7 +512,7 @@ impl Finder {
                         return ignore::WalkState::Continue;
                     }
                     let is_dir = e.file_type().is_some_and(|t| t.is_dir());
-                    if is_dir != dirs {
+                    if !(if is_dir { want.1 } else { want.0 }) {
                         return ignore::WalkState::Continue;
                     }
                     if let Ok(rel) = e.path().strip_prefix(&root) {
@@ -513,6 +561,10 @@ impl Finder {
         } else {
             let st = self.nucleo.tick(10);
             changed |= st.changed || st.running || self.walking.load(Ordering::Relaxed);
+            if self.kind == FinderKind::All {
+                let z = self.zero.tick(10);
+                changed |= z.changed || z.running;
+            }
         }
         changed
     }
@@ -611,6 +663,7 @@ impl Finder {
     pub fn len(&self) -> usize {
         match self.kind {
             FinderKind::Grep => self.grep.hits.lock().map(|h| h.len()).unwrap_or(0),
+            _ if self.zero_view() => self.zero.snapshot().matched_item_count() as usize,
             _ => self.nucleo.snapshot().matched_item_count() as usize,
         }
     }
@@ -634,7 +687,9 @@ impl Finder {
         }
         let rows = self.projects.clone();
         let rows = rows.lock().ok().filter(|_| self.kind == FinderKind::Projects);
-        let snap = self.nucleo.snapshot();
+        let zero = self.zero_view();
+        let dashy = zero || self.kind == FinderKind::Dash;
+        let snap = if zero { self.zero.snapshot() } else { self.nucleo.snapshot() };
         let pat = snap.pattern().column_pattern(0);
         let mut out = Vec::with_capacity(end - start);
         for it in snap.matched_items(start as u32..end as u32) {
@@ -643,7 +698,7 @@ impl Finder {
             idx.sort_unstable();
             idx.dedup();
             let s = it.data.clone();
-            let dash = self.dash.get(&s).filter(|_| self.kind == FinderKind::Dash);
+            let dash = self.dash.get(&s).filter(|_| dashy);
             let proj = rows.as_ref().and_then(|m| m.get(&s).cloned());
             let abs = if let Some(p) = &proj {
                 p.path.clone()
@@ -654,7 +709,7 @@ impl Finder {
             } else {
                 plan_normalize(&self.root.join(s.trim_end_matches('/')))
             };
-            let git = self.git.as_ref().filter(|_| matches!(self.kind, FinderKind::Git | FinderKind::Dash)).and_then(|m| m.get(&s).copied());
+            let git = self.git.as_ref().filter(|_| matches!(self.kind, FinderKind::Git | FinderKind::Dash | FinderKind::All)).and_then(|m| m.get(&s).copied());
             let tag = dash.map(|(t, _)| *t).filter(|_| git.is_none());
             out.push(Item { is_dir: s.ends_with('/') || proj.is_some(), display: s, abs, line: None, indices: idx, grep_text: None, git, tag, proj });
         }
@@ -673,6 +728,38 @@ impl Finder {
             return;
         }
         self.sel = (self.sel as isize + d).clamp(0, n as isize - 1) as usize;
+    }
+
+    /// ⇥ / ⇧⇥: the first row of the next / current-or-previous group (grep:
+    /// file · dash: pending, changes, marked, recent · projects: recent,
+    /// open, other · otherwise the parent folder). Wraps around.
+    pub fn jump_group(&mut self, d: isize) {
+        const SCAN: usize = 2000;
+        let n = self.len();
+        if n == 0 {
+            return;
+        }
+        let lo = self.sel.saturating_sub(SCAN);
+        let dash = self.zero_view() || self.kind == FinderKind::Dash;
+        let keys: Vec<String> = self.items(lo, (self.sel + SCAN).min(n)).iter().map(|it| group_key(it, dash)).collect();
+        let at = self.sel - lo;
+        let start_of = |i: usize| (0..=i).rev().take_while(|&j| keys[j] == keys[i]).last().unwrap_or(i);
+        self.sel = if d > 0 {
+            match (at..keys.len()).find(|&j| keys[j] != keys[at]) {
+                Some(j) => lo + j,
+                None => 0,
+            }
+        } else {
+            let s = start_of(at);
+            if s < at {
+                lo + s
+            } else if s > 0 {
+                lo + start_of(s - 1)
+            } else {
+                let last = keys.len() - 1;
+                lo + start_of(last)
+            }
+        };
     }
 
     pub fn follow(&mut self, h: usize) {
@@ -703,6 +790,24 @@ impl Drop for Finder {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn group_key(it: &Item, dash: bool) -> String {
+    if it.grep_text.is_some() {
+        return it.display.clone();
+    }
+    if let Some(p) = &it.proj {
+        return (if p.hopped.is_some() { "recent" } else if p.ws.is_some() { "open" } else { "other" }).into();
+    }
+    match (it.tag, it.git) {
+        (Some('◷'), _) => return "recent".into(),
+        (Some('●'), _) => return "marked".into(),
+        (Some(_), _) => return "pending".into(),
+        (None, Some(_)) if dash => return "changes".into(),
+        _ => {}
+    }
+    let d = it.display.trim_end_matches('/');
+    d.rfind('/').map(|i| d[..i].to_string()).unwrap_or_default()
 }
 
 fn plan_normalize(p: &Path) -> PathBuf {
@@ -907,6 +1012,87 @@ mod tests {
         let g = f.items(0, 5);
         assert_eq!(g.len(), 1);
         assert_eq!(g[0].line, Some(1));
+    }
+
+    fn settle(f: &mut Finder) {
+        let t0 = Instant::now();
+        while f.walking() && t0.elapsed() < Duration::from_secs(5) {
+            f.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for _ in 0..50 {
+            f.tick();
+        }
+    }
+
+    #[test]
+    fn all_walks_files_and_folders_and_shows_dash_when_empty() {
+        let t = crate::plan::tests::tmpdir("finder-all");
+        std::fs::create_dir_all(t.0.join("src/deep")).unwrap();
+        std::fs::write(t.0.join("src/deep/needle.rs"), "x").unwrap();
+        let cfg = crate::config::Config { state_dir: t.0.join(".state"), ..Default::default() };
+        push_recent(&cfg.state_dir, &[t.0.join("src/deep/needle.rs")]);
+        let mut f = Finder::new(FinderKind::All, t.0.clone(), &cfg);
+        settle(&mut f);
+        // empty query: the Dash rows
+        assert!(f.zero_view());
+        let z = f.items(0, 10);
+        assert_eq!(z.iter().map(|i| (i.display.as_str(), i.tag)).collect::<Vec<_>>(), [("src/deep/needle.rs", Some('◷'))]);
+        // typed: files and folders from the walk
+        f.query = "deep".into();
+        f.query_changed(true);
+        settle(&mut f);
+        let got: Vec<String> = f.items(0, 10).into_iter().map(|i| i.display).collect();
+        assert!(got.contains(&"src/deep/".to_string()) && got.contains(&"src/deep/needle.rs".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn sigils_switch_source() {
+        let t = crate::plan::tests::tmpdir("finder-sigil");
+        let cfg = crate::config::Config { state_dir: t.0.join(".state"), ..Default::default() };
+        let mut f = Finder::new(FinderKind::All, t.0.clone(), &cfg);
+        for (typed, kind, rest) in [("/fn main", FinderKind::Grep, "fn main"), ("@hop", FinderKind::Projects, "hop"), ("+", FinderKind::Git, ""), ("<re", FinderKind::Recent, "re")] {
+            f.set_kind(FinderKind::All);
+            f.query = typed.into();
+            f.qcur = typed.chars().count();
+            assert!(f.take_sigil(), "{typed}");
+            assert_eq!((f.kind, f.query.as_str(), f.qcur), (kind, rest, rest.chars().count()));
+        }
+        // only from All / Files, and fzf terms are left alone
+        for q in ["'exact", "^pre", "!not", "src/a"] {
+            f.set_kind(FinderKind::All);
+            f.query = q.into();
+            assert!(!f.take_sigil(), "{q}");
+        }
+        f.set_kind(FinderKind::Grep);
+        f.query = "@x".into();
+        assert!(!f.take_sigil());
+        assert_eq!(f.kind, FinderKind::Grep);
+    }
+
+    #[test]
+    fn tab_jumps_between_grep_files() {
+        let t = crate::plan::tests::tmpdir("finder-groups");
+        std::fs::write(t.0.join("a.txt"), "hay\nhay\n").unwrap();
+        std::fs::write(t.0.join("b.txt"), "hay\n").unwrap();
+        let cfg = crate::config::Config::default();
+        let mut f = Finder::new(FinderKind::Grep, t.0.clone(), &cfg);
+        f.query = "hay".into();
+        f.query_changed(true);
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        while (f.len() < 3 || f.walking()) && t0.elapsed() < Duration::from_secs(5) {
+            f.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let files: Vec<String> = f.items(0, 3).into_iter().map(|i| i.display).collect();
+        let first_other = files.iter().position(|d| *d != files[0]).unwrap();
+        f.jump_group(1);
+        assert_eq!(f.sel, first_other);
+        f.jump_group(1);
+        assert_eq!(f.sel, 0, "wraps");
+        f.jump_group(-1);
+        assert_eq!(f.sel, first_other, "back wraps to the last group");
     }
 
     #[test]

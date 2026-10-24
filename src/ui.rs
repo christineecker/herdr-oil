@@ -804,6 +804,60 @@ fn substr_indices(text: &str, q: &str) -> Vec<u32> {
     out
 }
 
+/// The finder's source chip colour.
+fn kind_color(th: &Theme, k: FinderKind) -> Color {
+    match k {
+        FinderKind::All | FinderKind::Files => th.accent,
+        FinderKind::Dirs => th.blue,
+        FinderKind::Grep => th.yellow,
+        FinderKind::Recent => th.teal,
+        FinderKind::Git => th.green,
+        FinderKind::Dash => th.peach,
+        FinderKind::Projects => th.red,
+    }
+}
+
+/// ␣ menu rows: key, source, what it lists.
+const SOURCES: &[(char, FinderKind, &str)] = &[
+    ('a', FinderKind::All, "files and folders · empty: dash"),
+    ('f', FinderKind::Files, "files only"),
+    ('d', FinderKind::Dirs, "folders only"),
+    ('g', FinderKind::Grep, "file contents (ripgrep)"),
+    ('r', FinderKind::Recent, "opened through oil"),
+    ('s', FinderKind::Git, "changed & untracked"),
+    ('p', FinderKind::Projects, "hop to a project"),
+    ('h', FinderKind::Dash, "pending, changes, marks, recent"),
+];
+
+fn draw_finder_menu(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
+    let lines: Vec<Line> = SOURCES
+        .iter()
+        .map(|(key, k, what)| {
+            let on = *k == cur;
+            let sig = k.sigil().map(|c| format!("{c} ")).unwrap_or_else(|| "  ".into());
+            Line::from(vec![
+                Span::styled(format!(" {key} "), Style::default().fg(th.yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {:<9}", k.label()), Style::default().fg(kind_color(th, *k)).add_modifier(if on { Modifier::BOLD | Modifier::UNDERLINED } else { Modifier::BOLD })),
+                Span::styled(sig, Style::default().fg(th.accent)),
+                Span::styled(format!("{what} "), Style::default().fg(th.subtext)),
+            ])
+        })
+        .collect();
+    let w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 2;
+    let h = lines.len() as u16 + 2;
+    let r = Rect {
+        x: area.right().saturating_sub(w + 1),
+        y: area.bottom().saturating_sub(h),
+        width: w.min(area.width),
+        height: h.min(area.height),
+    };
+    f.render_widget(Clear, r);
+    let blk = frame(th, "␣ source", th.accent);
+    let inner = blk.inner(r);
+    f.render_widget(blk, r);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.th.clone();
     let [tabs, prompt, body] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
@@ -812,24 +866,16 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let transfer = app.transfer.as_ref().map(|t| (t.copy, t.count));
     let Some(fd) = app.finder.as_mut() else { return };
 
-    // tabs
+    // hint line: how to reach the other sources from here
+    let keys: &[(&str, &str)] = match fd.kind {
+        _ if transfer.is_some() => &[("⇥", "files ⇄ folders")],
+        FinderKind::All | FinderKind::Files => &[("/", "grep"), ("@", "projects"), ("+", "changes"), ("<", "recent"), ("␣", "sources")],
+        _ => &[("⌫", "all"), ("⇥", "next group"), ("␣", "sources")],
+    };
     let mut ts = vec![Span::raw(" ")];
-    for (k, label, ic) in [
-        (FinderKind::Files, "Files", "\u{f0214}"),
-        (FinderKind::Dirs, "Dirs", "\u{f024b}"),
-        (FinderKind::Grep, "Grep", "\u{f0349}"),
-        (FinderKind::Recent, "Recent", "\u{f02da}"),
-        (FinderKind::Git, "Git", "\u{e702}"),
-        (FinderKind::Dash, "Dash", "\u{f0570}"),
-        (FinderKind::Projects, "Projects", "\u{f00d6}"),
-    ] {
-        let st = if fd.kind == k {
-            Style::default().fg(Color::Black).bg(th.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(th.subtext)
-        };
-        ts.push(Span::styled(format!(" {ic} {label} "), st));
-        ts.push(Span::raw(" "));
+    for (k, v) in keys {
+        ts.push(Span::styled(format!("{k} "), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)));
+        ts.push(Span::styled(format!("{v}  "), Style::default().fg(th.dim)));
     }
     let mut flags = String::new();
     if fd.hidden {
@@ -838,7 +884,11 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     if fd.no_ignore {
         flags.push_str(" +ignored");
     }
-    let count = if fd.kind == FinderKind::Grep { format!("{} hits", fd.len()) } else { format!("{}/{}", fd.len(), fd.total()) };
+    let count = match fd.kind {
+        FinderKind::Grep => format!("{} hits", fd.len()),
+        _ if fd.zero_view() => format!("{} to triage", fd.len()),
+        _ => format!("{}/{}", fd.len(), fd.total()),
+    };
     let trunc = if fd.truncated() { " (capped)" } else { "" };
     let used: usize = ts.iter().map(|s| s.content.width()).sum();
     let lead = format!("{}{}  \u{f07b} ", if fd.walking() { format!("{spin} ") } else { String::new() }, count);
@@ -872,10 +922,16 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         FinderKind::Git => "changed & untracked files — ⏎ diff view · ^a stage/unstage · alt-d discard…",
         FinderKind::Dash => "pending edits · git changes · marked · recent…",
         FinderKind::Files => "fuzzy-find files  ('exact ^prefix suffix$ !not)",
+        FinderKind::All => "find files & folders  ('exact ^prefix suffix$ !not) · start with / @ + < to switch",
         FinderKind::Projects => "hop to a project (name or branch) — ⏎ workspace · ^t tab · ^o explore · ^f files · ^n new…",
     };
-    let mut ps = vec![Span::styled(" \u{f0349} ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD))];
-    let mut lead_w = 3;
+    let chip = format!(" {} ", fd.kind.label());
+    let mut lead_w = 1 + chip.width() + 1;
+    let mut ps = vec![
+        Span::raw(" "),
+        Span::styled(chip, Style::default().fg(Color::Black).bg(kind_color(&th, fd.kind)).add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+    ];
     if let Some((copy, n)) = transfer {
         let label = format!(" {} {n} → ", if copy { "COPY" } else { "MOVE" });
         lead_w += label.width() + 1;
@@ -990,6 +1046,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
             FinderKind::Git if app.finder.as_ref().is_some_and(|f| f.git.is_none()) => "not in a git repository (or it defines its own filters)",
             FinderKind::Git if query.is_empty() => "working tree clean",
             FinderKind::Dash if query.is_empty() => "nothing pending, changed, marked or recent",
+            FinderKind::All if query.is_empty() => "nothing pending, changed, marked or recent — type to find files",
             FinderKind::Projects if app.finder.as_ref().is_some_and(|f| f.walking()) => "looking for projects…",
             FinderKind::Projects if query.is_empty() => "no projects here — set roots in [projects] (or herdr-hop's config) · ^a scope",
             FinderKind::Projects => "no matching project — ^n creates it",
@@ -1013,6 +1070,10 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
             }
             None => draw_preview(f, app, inner, None, None, Show::File),
         }
+    }
+    if app.finder_menu {
+        let cur = app.finder.as_ref().map(|f| f.kind).unwrap_or(FinderKind::All);
+        draw_finder_menu(f, &th, body, cur);
     }
 }
 
@@ -1112,7 +1173,7 @@ pub const KEYHINTS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("]", &[("g", "next changed entry"), ("c", "next changed entry")]),
     ("[", &[("g", "previous changed entry"), ("c", "previous changed entry")]),
-    (" ", &[("f", "find files"), ("g", "grep"), ("d", "find folders"), ("r", "recent files"), ("s", "git changes"), ("p", "projects (hop)"), ("␣", "find files")]),
+    (" ", &[("a", "find anything"), ("f", "find files"), ("g", "grep"), ("d", "find folders"), ("r", "recent files"), ("s", "git changes"), ("p", "projects (hop)"), ("h", "dashboard"), ("␣", "find anything")]),
     ("Z", &[("Z", "apply and quit"), ("Q", "quit, discard edits")]),
 ];
 
@@ -1218,10 +1279,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
         (View::Viewer, _) if app.viewer.as_ref().is_some_and(|v| v.diff) => &[("]c [c", "hunk"), ("⇥", "file"), ("s", "split"), ("w", "whitespace"), ("z", "expand"), ("v", "viewed"), ("c", "compare"), ("⏎", "open at line"), ("q", "back")],
         (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("/ n N", "search"), ("d", "diff"), ("L", "log"), ("e", "edit here"), ("p", "send"), ("q", "back")],
-        (View::Finder, _) if app.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Git) => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("⇥", "mode"), ("esc", "back")],
+        (View::Finder, _) if app.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Git) => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("⇥", "group"), ("esc", "back")],
         (View::Finder, _) if app.transfer.is_none() && app.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) => &[("⏎", "hop"), ("^t", "tab"), ("^o", "explore"), ("^f", "files"), ("^n", "new"), ("^a", "scope"), ("^k", "close ws"), ("esc", "back")],
         (View::Finder, _) if app.transfer.is_some() => &[("⏎", "here"), ("^n", "new folder from query"), ("⇥", "files/dirs"), ("^r", "root"), ("esc", "cancel")],
-        (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^o", "reveal"), ("^s", "send"), ("⇥", "mode"), ("^r", "root"), ("esc", "back")],
+        (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^o", "reveal"), ("^s", "send"), ("⇥", "group"), ("^r", "root"), ("esc", "back")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
         (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("I A", "prefix/suffix"), (":", "s/…/…/"), ("esc", "cancel")],
         _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "find"), ("g?", "help"), ("esc", "close")],
@@ -1651,10 +1712,14 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("i a I A s S C D x r ~ J", "the usual"),
         ("/pattern n N", "search lines"),
     ]),
-    ("Finder (⇥, ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git · ␣p projects · :dash)", &[
+    ("Finder (⇥ or ␣␣ all · ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git · ␣p projects · ␣h dash)", &[
         ("type", "fuzzy query ('exact ^prefix suffix$ !not)"),
+        ("/ @ + <  typed first", "switch to grep · projects · changes · recent (from All or Files)"),
+        ("empty query in All", "pending edits, git changes, marked and recent files"),
+        ("␣ or ? on empty", "pick a source: a f d g r s p h"),
+        ("⌫ on empty", "back to All, then to the explorer"),
         ("foo -- *.rs  -t py", "grep: only these globs / file types"),
-        ("⇥ ⇧⇥", "cycle Files / Dirs / Grep / Recent / Git / Dash / Projects"),
+        ("⇥ ⇧⇥", "next · previous group (grep: file · dash: section · else folder)"),
         ("^s  alt-s", "send selection / marked paths · their grep lines as text"),
         ("⏎ ^v ^x ^t ^e", "open (default · split · below · tab · popup)"),
         ("Git: ⏎ ^a alt-d", "diff view of all changes · stage ⇄ unstage · discard"),
@@ -1664,7 +1729,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("^r", "root: cwd ⇄ repository ⇄ parent"),
         ("alt-h alt-i", "toggle hidden · ignored files"),
         ("^y", "copy path"),
-        ("esc / ⌫ on empty", "back to explorer"),
+        ("esc", "back to explorer"),
     ]),
     ("Projects (␣p, :projects, the Projects tab; herdr-hop's roots and recents)", &[
         ("type", "fuzzy over name and branch"),

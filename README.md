@@ -30,7 +30,16 @@ case-only renames on APFS, "move the child out, delete the parent" and
 overwritten; clashes are reported before anything runs, and flagged on
 the line (`! ✗ already exists`) while you type.
 
-The finder (`⇥` from the explorer, or its own key) has seven modes:
+The finder (`⇥` from the explorer, or its own key) is one prompt. It opens
+on **All**: files and folders from one walk, and while the query is empty the
+Dash rows (pending edits, changes, marked and recent files). A first character
+picks another source and turns into a chip before the query: `/` grep,
+`@` projects, `+` git changes, `<` recent (`/fn main` greps for `fn main`).
+None of these start an fzf term, so `'exact`, `^prefix` and `!not` still work.
+`⌫` on an empty query goes back to All; `␣` or `?` there opens a menu of every
+source (`a f d g r s p h`, the same letters as the explorer's `␣` keys), and
+`⇥` jumps to the next group: the next file in grep, the next section in Dash,
+the next folder elsewhere. The sources:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
 matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
 opened through herdr-oil), **Git** (changed and untracked files across the
@@ -82,7 +91,7 @@ type = "plugin_action"
 command = "herdr-oil.grep"
 ```
 
-Actions: `explorer`, `finder`, `grep`, `recent`, `git`, `projects`. Each opens the popup at the
+Actions: `explorer`, `finder` (All), `grep`, `recent`, `git`, `projects`. Each opens the popup at the
 focused pane's working directory.
 
 ## Projects
@@ -172,7 +181,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:stage` `:unstage` `:restore` | on the line or a range; `:restore` asks first |
 | `gd` | sizes → perms · size · age → owner · perms · xattrs (`@`) · broken links → off |
 | `gw` | parent-folder column (wide popups); click a header path segment to jump there |
-| `⇥` `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `:dash` | finder: files · grep · dirs · recent · git changes · projects · dashboard |
+| `⇥` `␣␣` `␣a` `:find` · `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `␣h` | finder: all · files · grep · dirs · recent · git changes · projects · dashboard |
 
 | viewer (`⏎` on a file) | |
 |---|---|
@@ -198,7 +207,10 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 
 | finder | |
 |---|---|
-| `⇥` `⇧⇥` | cycle Files / Dirs / Grep / Recent / Git / Dash / Projects |
+| `/` `@` `+` `<` typed first | switch to grep · projects · git changes · recent (from All or Files) |
+| `␣` `?` on an empty query | menu of sources: `a` all · `f` files · `d` folders · `g` grep · `r` recent · `s` changes · `p` projects · `h` dash |
+| `⌫` on an empty query | back to All, then to the explorer |
+| `⇥` `⇧⇥` | next · previous group (grep: file · Dash: section · otherwise folder); picking a move/copy target: files ⇄ folders |
 | `^o` | reveal the selection in the explorer |
 | `^space` | mark files or grep hits (each hit keeps its line); `⏎` opens them all, `^s` sends them |
 | `^r` | root: cwd → repository root → parent |
@@ -227,7 +239,7 @@ tints blend into `background` from herdr's `[theme.custom]` (default
 
 ```sh
 herdr-oil [DIR|FILE]          # explore (FILE: its dir, cursor on it)
-herdr-oil --finder | --grep | --recent | --git | --projects
+herdr-oil --finder | --files | --grep | --recent | --git | --dash | --projects
 herdr-oil --pick              # print chosen file(s) instead of opening
 ```
 
