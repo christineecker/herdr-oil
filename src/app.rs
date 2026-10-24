@@ -23,6 +23,18 @@ use std::time::{Duration, Instant};
 pub enum View {
     Explorer,
     Finder,
+    Viewer,
+}
+
+/// A file shown read-only inside the popup.
+pub struct Viewer {
+    pub path: PathBuf,
+    pub line: Option<usize>,
+    /// First visible line; None until the first draw places it.
+    pub top: Option<usize>,
+    pub back: View,
+    pub height: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -62,6 +74,8 @@ pub struct App {
     pub msg: Option<(String, MsgKind, Instant)>,
     pub origin: Option<String>,
     pub preview: preview::Cache,
+    pub viewer: Option<Viewer>,
+    pub viewer_cache: preview::Cache,
     pub preview_scroll: usize,
     pub quit: bool,
     pub pick: bool,
@@ -99,6 +113,8 @@ impl App {
             msg: None,
             origin: std::env::var("HERDR_OIL_ORIGIN").ok().filter(|s| crate::launch::flag_safe(s)),
             preview: preview::Cache::default(),
+            viewer: None,
+            viewer_cache: preview::Cache::default(),
             preview_scroll: 0,
             quit: false,
             pick,
@@ -248,6 +264,12 @@ impl App {
             return;
         }
         finder::push_recent(&self.cfg.state_dir, &files);
+        if how == OpenTarget::View {
+            let back = if self.view == View::Viewer { View::Explorer } else { self.view };
+            self.viewer = Some(Viewer { path: files[0].clone(), line, top: None, back, height: 20, total: 0 });
+            self.view = View::Viewer;
+            return;
+        }
         match open::open(&files, line, how, &self.cfg, self.origin.as_deref()) {
             Ok(Outcome::Suspend(argv)) => self.suspend = Some(argv),
             Ok(Outcome::Handed(m)) => {
@@ -463,6 +485,7 @@ impl App {
                 self.act(a);
             }
             View::Finder => self.finder_key(k),
+            View::Viewer => self.viewer_key(k),
         }
     }
 
@@ -656,6 +679,49 @@ impl App {
         }
     }
 
+    fn viewer_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(v) = self.viewer.as_mut() else {
+            self.view = View::Explorer;
+            return;
+        };
+        let h = v.height.max(1);
+        let max_top = v.total.saturating_sub(h);
+        let top = v.top.unwrap_or(0);
+        let mut scroll = |d: isize| v.top = Some((top as isize + d).clamp(0, max_top as isize) as usize);
+        let path = v.path.clone();
+        let line = v.line;
+        match (k.code, ctrl) {
+            (KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter, false) => scroll(1),
+            (KeyCode::Char('k') | KeyCode::Up, false) => scroll(-1),
+            (KeyCode::Char('d'), true) => scroll(h as isize / 2),
+            (KeyCode::Char('u'), true) => scroll(-(h as isize / 2)),
+            (KeyCode::Char(' ') | KeyCode::PageDown, false) | (KeyCode::Char('f'), true) => scroll(h as isize - 1),
+            (KeyCode::Char('b') | KeyCode::PageUp, false) | (KeyCode::Char('b'), true) => scroll(-(h as isize - 1)),
+            (KeyCode::Char('g') | KeyCode::Home, false) => scroll(-(top as isize)),
+            (KeyCode::Char('G') | KeyCode::End, false) => scroll(max_top as isize),
+            (KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('h') | KeyCode::Char('-') | KeyCode::Backspace | KeyCode::Left, false) => {
+                self.view = v.back;
+                self.viewer = None;
+            }
+            (KeyCode::Char('c'), true) => self.try_quit(false),
+            (KeyCode::Char('e'), _) => self.open_files(vec![path], line, OpenTarget::Popup),
+            (KeyCode::Char('v'), true) => self.open_files(vec![path], line, OpenTarget::SplitRight),
+            (KeyCode::Char('x'), true) => self.open_files(vec![path], line, OpenTarget::SplitDown),
+            (KeyCode::Char('t'), true) => self.open_files(vec![path], line, OpenTarget::Tab),
+            (KeyCode::Char('o'), false) => {
+                if let Err(e) = open::system_open(&path) {
+                    self.flash(e, MsgKind::Err);
+                }
+            }
+            (KeyCode::Char('y'), false) => match open::clipboard(&path.display().to_string()) {
+                Ok(()) => self.flash(format!("copied {}", finder::tilde(&path)), MsgKind::Ok),
+                Err(e) => self.flash(e, MsgKind::Err),
+            },
+            _ => {}
+        }
+    }
+
     fn mouse(&mut self, m: event::MouseEvent) {
         let a = self.list_area;
         let inside = m.column >= a.x && m.column < a.x + a.width && m.row >= a.y && m.row < a.y + a.height;
@@ -672,6 +738,12 @@ impl App {
                         b.row = (b.row as isize + d).clamp(0, b.lines.len() as isize - 1) as usize;
                         b.clamp();
                         b.follow();
+                    }
+                    View::Viewer => {
+                        if let Some(v) = self.viewer.as_mut() {
+                            let max_top = v.total.saturating_sub(v.height.max(1));
+                            v.top = Some((v.top.unwrap_or(0) as isize + d).clamp(0, max_top as isize) as usize);
+                        }
                     }
                     View::Finder => {
                         if !inside {
@@ -701,6 +773,7 @@ impl App {
                             }
                         }
                     }
+                    View::Viewer => {}
                     View::Finder => {
                         if let Some(f) = self.finder.as_mut() {
                             let r = f.scroll + rel;

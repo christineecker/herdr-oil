@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.view {
         View::Explorer => draw_explorer(f, app, main),
         View::Finder => draw_finder(f, app, main),
+        View::Viewer => draw_viewer(f, app, main),
     }
     draw_status(f, app, status);
     match &app.overlay {
@@ -332,10 +333,46 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, l
     }
     f.render_widget(Paragraph::new(Line::from(t)), title);
     let hidden = app.hidden;
-    let c = app.preview.get(path, line, body.width, &th, hidden);
+    let c = app.preview.get(path, line, body.width, &th, hidden, crate::preview::PREVIEW_LINES);
     let base = c.focus.saturating_sub(body.height as usize / 3);
     let start = (base + app.preview_scroll).min(c.lines.len().saturating_sub(1));
     let lines: Vec<Line> = c.lines.iter().skip(start).take(body.height as usize).cloned().collect();
+    f.render_widget(Paragraph::new(lines), Rect { x: body.x + 1, width: body.width.saturating_sub(1), ..body });
+}
+
+// ── viewer ──────────────────────────────────────────────────────────────────
+
+fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
+    let th = app.th.clone();
+    let hidden = app.hidden;
+    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let Some(v) = app.viewer.as_mut() else { return };
+    let c = app.viewer_cache.get(&v.path, v.line, body.width.saturating_sub(1), &th, hidden, crate::preview::VIEWER_LINES);
+    let h = body.height as usize;
+    v.height = h;
+    v.total = c.lines.len();
+    let max_top = v.total.saturating_sub(h);
+    let top = v.top.unwrap_or_else(|| c.focus.saturating_sub(h / 3)).min(max_top);
+    v.top = Some(top);
+    let name = v.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let dir = v.path.parent().map(tilde).unwrap_or_default();
+    let meta = std::fs::metadata(&v.path).ok();
+    let (ic, col) = entry::icon(&name, Kind::File);
+    let pos = if v.total == 0 { String::new() } else { format!("{}–{} of {} ", top + 1, (top + h).min(v.total), v.total) };
+    let mut hs = vec![
+        Span::styled(format!(" {ic} "), Style::default().fg(icon_color(&th, col))),
+        Span::styled(format!("{dir}/"), Style::default().fg(th.subtext)),
+        Span::styled(name, Style::default().fg(th.text).add_modifier(Modifier::BOLD)),
+    ];
+    if let Some(m) = &meta {
+        hs.push(Span::styled(format!("  {}  {}", entry::human_size(m.len()), entry::age(m.modified().ok())), Style::default().fg(th.dim)));
+    }
+    let used: usize = hs.iter().map(|s| s.content.width()).sum();
+    hs.push(Span::raw(" ".repeat((head.width as usize).saturating_sub(used + pos.width()))));
+    hs.push(Span::styled(pos, Style::default().fg(th.dim)));
+    f.render_widget(Paragraph::new(Line::from(hs)), head);
+    let lines: Vec<Line> = c.lines.iter().skip(top).take(h).cloned().collect();
+    app.list_area = body;
     f.render_widget(Paragraph::new(lines), Rect { x: body.x + 1, width: body.width.saturating_sub(1), ..body });
 }
 
@@ -546,6 +583,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let (label, bg) = match (app.view, &app.vim.mode) {
         (View::Finder, _) => (" FIND ", th.blue),
+        (View::Viewer, _) => (" VIEW ", th.teal),
         (_, Mode::Normal) => (" OIL ", th.accent),
         (_, Mode::Insert) => (" INSERT ", th.green),
         (_, Mode::Visual { .. }) => (" V-LINE ", th.peach),
@@ -566,10 +604,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         sp.push(Span::styled(m.clone(), Style::default().fg(c)));
     }
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
+        (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("e", "edit here"), ("^v", "split"), ("^t", "tab"), ("y", "copy path"), ("q", "back")],
         (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^t", "tab"), ("^o", "reveal"), ("⇥", "mode"), ("^r", "root"), ("esc", "back")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
         (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("esc", "cancel")],
-        _ => &[("⏎", "open"), ("-", "up"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("q", "quit")],
+        _ => &[("⏎", "open"), ("-", "up"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("esc", "close")],
     };
     let mut hs = Vec::new();
     for (k, v) in hints {
@@ -724,17 +763,24 @@ fn draw_report(f: &mut Frame, th: &Theme, area: Rect, title: &str, lines: &[Stri
 
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Explorer — the listing is a text buffer", &[
-        ("⏎ / dbl-click", "open file · enter directory"),
+        ("⏎ / dbl-click", "view file in oil · enter directory"),
         ("-  ⌫", "parent directory"),
         ("_  ~", "start directory · home"),
         ("^v ^x ^t", "open in split right / below / new tab"),
-        ("^e", "edit inside the popup, come back after"),
+        ("^e", "edit in $EDITOR inside the popup, come back after"),
         ("gx", "open with system app"),
         ("gy", "copy absolute path"),
         ("g.  gs  gd", "hidden files · cycle sort · sizes → details → off"),
         ("^p", "toggle preview (^f/^b scroll it)"),
         ("^l  :e!", "refresh · discard edits here"),
-        ("q  ZZ  ZQ", "quit · apply+quit · quit discarding"),
+        ("q  esc  ZZ  ZQ", "quit (asks if unsaved) · apply+quit · discard+quit"),
+    ]),
+    ("Viewer (⏎ on a file)", &[
+        ("j k  ␣ b  ^d ^u  g G", "scroll · page · half page · top/bottom"),
+        ("e", "edit in $EDITOR, back to the viewer after"),
+        ("^v ^x ^t  o", "open in split / below / tab · system app"),
+        ("y", "copy path"),
+        ("q  esc  h  -", "back to the listing (or finder)"),
     ]),
     ("Editing = file operations (applied on :w)", &[
         ("cw ciw cin ...", "rename (cin = name stem, can = extension)"),

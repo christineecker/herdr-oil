@@ -491,6 +491,11 @@ impl Vim {
             KeyCode::Char(c) => c,
             KeyCode::Enter => '\n',
             KeyCode::Esc => {
+                // First cancel a half-typed command; Esc on a clean slate closes
+                // the popup (the app asks first when there are unsaved edits).
+                if self.pending.is_empty() {
+                    return Action::Quit;
+                }
                 self.pending.clear();
                 return Action::None;
             }
@@ -1071,6 +1076,9 @@ mod tests {
         let mut b = buf(&[(Some(1), "a")]);
         let mut v = Vim::default();
         assert_eq!(keys(&mut v, &mut b, "-"), [Action::Parent]);
+        assert_eq!(keys(&mut v, &mut b, "d\x1b"), []);
+        assert_eq!(keys(&mut v, &mut b, "\x1b"), [Action::Quit]);
+        assert_eq!(keys(&mut v, &mut b, "ix\x1b"), []);
         assert_eq!(keys(&mut v, &mut b, "g."), [Action::ToggleHidden]);
         assert_eq!(keys(&mut v, &mut b, ":w\n"), [Action::Save]);
         assert_eq!(keys(&mut v, &mut b, ":wq\n"), [Action::SaveQuit]);

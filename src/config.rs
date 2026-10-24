@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenTarget {
+    /// Read-only viewer inside the oil popup (highlighted, scrollable).
+    View,
     /// Origin pane when it sits at a shell prompt, else a split to the right.
     Auto,
     /// Run the editor inside the popup, come back to the explorer after.
@@ -19,6 +21,7 @@ pub enum OpenTarget {
 impl OpenTarget {
     pub fn parse(s: &str) -> Option<OpenTarget> {
         Some(match s {
+            "view" => OpenTarget::View,
             "auto" => OpenTarget::Auto,
             "popup" => OpenTarget::Popup,
             "split" | "split-right" | "vsplit" => OpenTarget::SplitRight,
@@ -63,11 +66,11 @@ impl Default for Config {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         Config {
             editor: None,
-            open: OpenTarget::Auto,
+            open: OpenTarget::View,
             delete: DeleteMethod::Trash,
             show_hidden: false,
             details: 1,
-            preview: false,
+            preview: true,
             icons: true,
             git_status: true,
             confirm: true,

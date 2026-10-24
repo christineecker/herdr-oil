@@ -98,6 +98,13 @@ pub fn open(files: &[PathBuf], line: Option<usize>, how: OpenTarget, cfg: &Confi
         return Err("nothing to open".into());
     }
     let argv = editor_argv(&cfg.editor(), files, line);
+    // Split/tab/origin targets *type* the command into a shell. A control
+    // character in a file name (\r, \x15, \x1b…) would be interpreted by the
+    // shell's line editor, so refuse those targets outright.
+    let typed = matches!(how, OpenTarget::Auto | OpenTarget::SplitRight | OpenTarget::SplitDown | OpenTarget::Tab);
+    if typed && argv.iter().any(|a| a.chars().any(char::is_control)) {
+        return Err("name contains control characters — use ^e to edit inside the popup".into());
+    }
     let dir = files[0].parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"));
     let name = files[0].file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let herdr_ok = launch::in_herdr();
@@ -115,7 +122,7 @@ pub fn open(files: &[PathBuf], line: Option<usize>, how: OpenTarget, cfg: &Confi
         };
     }
     match how {
-        OpenTarget::Popup | OpenTarget::Auto => Ok(Outcome::Suspend(argv)),
+        OpenTarget::Popup | OpenTarget::Auto | OpenTarget::View => Ok(Outcome::Suspend(argv)),
         OpenTarget::System => {
             for f in files {
                 system_open(f)?;
@@ -175,6 +182,14 @@ mod tests {
         assert_eq!(sh_quote("it's here"), "'it'\\''s here'");
         assert_eq!(split_words("code -w"), ["code", "-w"]);
         assert_eq!(split_words("'my editor' --x \"\""), ["my editor", "--x", ""]);
+    }
+
+    #[test]
+    fn refuses_control_chars_when_typing() {
+        let cfg = Config::default();
+        let f = vec![PathBuf::from("/tmp/evil\rrm -rf ~")];
+        assert!(open(&f, None, OpenTarget::SplitRight, &cfg, Some("w1:p1")).is_err());
+        assert!(matches!(open(&f, None, OpenTarget::Popup, &cfg, None), Ok(Outcome::Suspend(_))));
     }
 
     #[test]

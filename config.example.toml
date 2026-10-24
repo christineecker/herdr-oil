@@ -4,18 +4,19 @@
 # editor = "nvim"
 
 # What Enter does with a file:
+#   "view"        read-only viewer inside the oil window (default); e edits
+#   "popup"       $EDITOR inside the popup, return to the explorer afterwards
 #   "auto"        type `$EDITOR file` into the pane you came from when it sits
-#                 at a shell prompt, else open a split to its right (default)
-#   "popup"       edit inside the popup, return to the explorer afterwards
+#                 at a shell prompt, else open a split to its right
 #   "split" | "split-down" | "tab" | "system"
-# open = "auto"
+# open = "view"
 
 # "trash" (default: ~/.Trash on macOS, XDG trash on Linux) or "permanent".
 # delete = "trash"
 
 # show_hidden = false
 # details = "size"       # "size" (default), "full" = perms + size + age, "off"; gd cycles
-# preview = false        # preview pane in the explorer (toggle: ctrl-p)
+# preview = true         # preview pane in the explorer (toggle: ctrl-p)
 # icons = true           # needs a Nerd Font
 # git_status = true      # M/A/?/! markers per entry
 # confirm = true         # review dialog before applying (always on for deletes)

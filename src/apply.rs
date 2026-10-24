@@ -41,8 +41,10 @@ pub fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
             copy_recursive(&de.path(), &dst.join(de.file_name()))?;
         }
         fs::set_permissions(dst, m.permissions())
-    } else {
+    } else if ft.is_file() {
         fs::copy(src, dst).map(|_| ())
+    } else {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "cannot copy a special file (fifo, socket or device)"))
     }
 }
 

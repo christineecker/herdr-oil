@@ -16,6 +16,7 @@ pub struct Key {
     pub path: PathBuf,
     pub line: Option<usize>,
     pub width: u16,
+    pub max: usize,
     pub mtime: Option<std::time::SystemTime>,
 }
 
@@ -51,14 +52,16 @@ fn bat_bin() -> Option<&'static str> {
     })
 }
 
-const MAX_LINES: usize = 400;
+/// Line cap for the side preview; the full viewer asks for far more.
+pub const PREVIEW_LINES: usize = 400;
+pub const VIEWER_LINES: usize = 50_000;
 
 impl Cache {
-    pub fn get(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool) -> &Cache {
+    pub fn get(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize) -> &Cache {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let key = Key { path: path.to_path_buf(), line, width, mtime };
+        let key = Key { path: path.to_path_buf(), line, width, max, mtime };
         if self.key.as_ref() != Some(&key) {
-            let (lines, focus) = render(path, line, width, th, hidden);
+            let (lines, focus) = render(path, line, width, th, hidden, max);
             self.lines = lines;
             self.focus = focus;
             self.key = Some(key);
@@ -67,13 +70,17 @@ impl Cache {
     }
 }
 
-fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool) -> (Vec<Line<'static>>, usize) {
+fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize) -> (Vec<Line<'static>>, usize) {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => return (vec![Line::styled(format!(" {e}"), Style::default().fg(th.red))], 0),
     };
+    if !meta.is_dir() && !meta.is_file() {
+        // FIFOs, sockets and devices: opening them can block forever.
+        return (vec![Line::styled(" special file — no preview", Style::default().fg(th.dim))], 0);
+    }
     if meta.is_dir() {
-        return (dir_listing(path, th, hidden), 0);
+        return (dir_listing(path, th, hidden, max), 0);
     }
     // binary sniff
     let mut head = [0u8; 8192];
@@ -94,8 +101,8 @@ fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool
         return (v, 0);
     }
     let (start, end) = match line {
-        Some(l) => (l.saturating_sub(MAX_LINES / 4).max(1), l + MAX_LINES * 3 / 4),
-        None => (1, MAX_LINES),
+        Some(l) => (l.saturating_sub(max / 4).max(1), l + max * 3 / 4),
+        None => (1, max),
     };
     if let Some(bat) = bat_bin() {
         let mut cmd = Command::new(bat);
@@ -132,7 +139,7 @@ fn render(path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool
     (v, line.map(|l| l - start).unwrap_or(0))
 }
 
-fn dir_listing(path: &Path, th: &Theme, hidden: bool) -> Vec<Line<'static>> {
+fn dir_listing(path: &Path, th: &Theme, hidden: bool, max: usize) -> Vec<Line<'static>> {
     let mut store = Store::default();
     let ids = match store.list(path, hidden, Sort::Name) {
         Ok(v) => v,
@@ -142,7 +149,7 @@ fn dir_listing(path: &Path, th: &Theme, hidden: bool) -> Vec<Line<'static>> {
         return vec![Line::styled(" (empty directory)", Style::default().fg(th.dim))];
     }
     ids.iter()
-        .take(MAX_LINES)
+        .take(max)
         .filter_map(|id| store.get(*id))
         .map(|e| {
             let (ic, col) = entry::icon(&e.name, e.kind);
