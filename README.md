@@ -13,6 +13,7 @@ herdr-oil diffs the buffer against the disk, shows the plan, and applies it.
 | `dd`                                    | delete (to Trash)       |
 | `dd`, go elsewhere (`-`, `⏎`), `p`       | move                    |
 | `yy`, `p`, edit the name                | copy                    |
+| `yy` or `dd`, then `gm` / `gc`          | move / copy to a fuzzy-picked folder |
 
 Edits in several directories are kept and applied together. Swaps (`a`↔`b`),
 case-only renames on APFS, "move the child out, delete the parent" and
@@ -85,6 +86,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:w` `^s` `ZZ` | review & apply · apply and quit |
 | `q` `esc` | close (asks first when edits are unsaved; esc cancels a pending key first) |
 | `u` `^r` | undo · redo (per directory) |
+| `gm` `gc` | after a yank (`yy`, `V…y`): move / copy the yanked entries to a folder picked in the finder (`⏎` picks a folder, a file means its folder, `^n` uses the query as a new sub-folder); after a cut (`dd`) only `gm`. Shown in the `g` menu only while something is yanked; the review dialog follows |
 | `g.` `gs` `gd` `^p` | hidden · sort · sizes/details/off · preview |
 | `gy` | copy absolute path |
 | `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:e!` | |

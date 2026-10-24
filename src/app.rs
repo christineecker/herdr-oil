@@ -26,6 +26,13 @@ pub enum View {
     Viewer,
 }
 
+/// Yanked/cut lines waiting for a destination picked in the finder.
+pub struct Transfer {
+    pub copy: bool,
+    pub lines: Vec<crate::buffer::Line>,
+    pub count: usize,
+}
+
 /// A file shown read-only inside the popup.
 pub struct Viewer {
     pub path: PathBuf,
@@ -75,6 +82,7 @@ pub struct App {
     pub origin: Option<String>,
     pub preview: preview::Cache,
     pub viewer: Option<Viewer>,
+    pub transfer: Option<Transfer>,
     pub viewer_cache: preview::Cache,
     pub preview_scroll: usize,
     pub quit: bool,
@@ -114,6 +122,7 @@ impl App {
             origin: std::env::var("HERDR_OIL_ORIGIN").ok().filter(|s| crate::launch::flag_safe(s)),
             preview: preview::Cache::default(),
             viewer: None,
+            transfer: None,
             viewer_cache: preview::Cache::default(),
             preview_scroll: 0,
             quit: false,
@@ -311,6 +320,80 @@ impl App {
         self.open_files(vec![e.path.clone()], None, how.unwrap_or(self.cfg.open));
     }
 
+    /// `gm` / `gc` after a yank or cut: pick a destination folder with the finder.
+    fn start_transfer(&mut self, copy: bool) {
+        let lines: Vec<_> = match &self.vim.reg {
+            Some(Reg::Lines(ls)) => ls.iter().filter(|l| l.significant()).cloned().collect(),
+            _ => vec![],
+        };
+        if lines.is_empty() {
+            self.flash("yank (yy) or cut (dd) a file or folder first", MsgKind::Warn);
+            return;
+        }
+        // Search from the repository root when there is one: destinations are
+        // usually elsewhere in the project. ^r cycles roots as usual.
+        let root = finder::repo_root(&self.cwd).unwrap_or_else(|| self.cwd.clone());
+        self.finder = Some(Finder::new(FinderKind::Dirs, root, &self.cfg));
+        let count = lines.len();
+        self.transfer = Some(Transfer { copy, lines, count });
+        self.view = View::Finder;
+        self.finder_only = false;
+        self.preview_scroll = 0;
+    }
+
+    /// Stage the transfer as buffer edits (paste into the destination folder,
+    /// and for a move drop the originals wherever they are listed), then show
+    /// the usual review dialog. `sub` is a new sub-path typed with ^n.
+    fn finish_transfer(&mut self, dest: PathBuf, sub: Option<String>) {
+        let Some(t) = self.transfer.take() else { return };
+        self.view = View::Explorer;
+        let dest = std::fs::canonicalize(&dest).unwrap_or(dest);
+        if !dest.is_dir() {
+            self.flash(format!("not a folder: {}", finder::tilde(&dest)), MsgKind::Err);
+            return;
+        }
+        let prefix = sub.map(|s| s.trim().trim_matches('/').to_string()).filter(|s| !s.is_empty());
+        let all_here = t.lines.iter().all(|l| l.id.and_then(|id| self.store.get(id)).is_some_and(|e| e.path.parent() == Some(dest.as_path())));
+        if all_here && prefix.is_none() {
+            self.flash(if t.copy { "same folder — use p to duplicate here" } else { "already in this folder" }, MsgKind::Info);
+            return;
+        }
+        if !t.copy {
+            let ids: std::collections::HashSet<u64> = t.lines.iter().filter_map(|l| l.id).collect();
+            for b in self.buffers.values_mut() {
+                if b.lines.iter().any(|l| l.id.is_some_and(|id| ids.contains(&id))) {
+                    b.snapshot();
+                    b.lines.retain(|l| !l.id.is_some_and(|id| ids.contains(&id)));
+                    b.ensure_nonempty();
+                    b.clamp();
+                }
+            }
+        }
+        let (h, s, g) = (self.hidden, self.sort, self.cfg.git_status);
+        let store = &mut self.store;
+        let d = self.buffers.entry(dest.clone()).or_insert_with(|| crate::buffer::Buffer::load(&dest, store, h, s, g));
+        d.snapshot();
+        d.lines.retain(|l| l.significant());
+        for mut l in t.lines {
+            if let Some(p) = &prefix {
+                l.text = format!("{p}/{}", l.text.trim());
+            }
+            d.lines.push(l);
+        }
+        d.ensure_nonempty();
+        if !t.copy {
+            // the entries moved; don't let a later p duplicate them
+            self.vim.reg = None;
+        }
+        let verb = if t.copy { "copy" } else { "move" };
+        let place = match &prefix {
+            Some(p) => format!("{}/{p}/", finder::tilde(&dest)),
+            None => format!("{}/", finder::tilde(&dest)),
+        };
+        self.flash(format!("{verb} {} → {place} staged", t.count), MsgKind::Info);
+        self.save(false);
+    }
+
     fn open_finder(&mut self, k: FinderKind) {
         match &mut self.finder {
             Some(f) if f.root == self.cwd => f.set_kind(k),
@@ -407,6 +490,7 @@ impl App {
                 self.flash("edits in this directory discarded", MsgKind::Info);
             }
             Action::Finder(k) => self.open_finder(k),
+            Action::Transfer { copy } => self.start_transfer(copy),
             Action::YankPath => {
                 let p = match self.buf().cur_entry(&self.store) {
                     Some(e) => e.path.clone(),
@@ -549,6 +633,38 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let page = self.list_area.height.max(2) as isize - 1;
+        if self.transfer.is_some() {
+            let Some(f) = self.finder.as_mut() else { return };
+            match (k.code, ctrl) {
+                (KeyCode::Esc, _) | (KeyCode::Char('c'), true) => {
+                    self.transfer = None;
+                    self.view = View::Explorer;
+                    self.flash("move/copy cancelled", MsgKind::Info);
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(it) = f.selected() {
+                        // a file (Files/Grep/Recent) stands for its folder
+                        let dest = if it.is_dir { it.abs } else { it.abs.parent().map(Path::to_path_buf).unwrap_or(it.abs) };
+                        self.finish_transfer(dest, None);
+                    }
+                    return;
+                }
+                (KeyCode::Char('n'), true) => {
+                    let (root, q) = (f.root.clone(), f.query.clone());
+                    if q.trim().is_empty() {
+                        self.flash("type the new folder path first, then ^n", MsgKind::Warn);
+                    } else if q.contains("..") || q.trim().starts_with('/') || q.trim().starts_with('~') {
+                        self.flash("new folder must be a path inside the search root", MsgKind::Warn);
+                    } else {
+                        self.finish_transfer(root, Some(q));
+                    }
+                    return;
+                }
+                (KeyCode::Char('v' | 'x' | 't' | 'e' | 'g' | 'o' | 'y' | ' '), true) => return,
+                _ => {}
+            }
+        }
         let Some(f) = self.finder.as_mut() else { return };
         let mut open_how: Option<OpenTarget> = None;
         let mut edited = None;
@@ -858,5 +974,96 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::Op;
+
+    fn app_in(tag: &str) -> (crate::plan::tests::Tmp, App) {
+        let t = crate::plan::tests::tmpdir(tag);
+        std::fs::create_dir_all(t.0.join("src/deep")).unwrap();
+        std::fs::write(t.0.join("a.txt"), "a").unwrap();
+        std::fs::write(t.0.join("b.txt"), "b").unwrap();
+        let cfg = Config { git_status: false, state_dir: t.0.join(".state"), ..Config::default() };
+        let app = App::new(t.0.clone(), "explorer", cfg, false);
+        (t, app)
+    }
+
+    fn row_of(app: &App, name: &str) -> usize {
+        app.buf().lines.iter().position(|l| l.text == name).unwrap()
+    }
+
+    fn yank(app: &mut App, from: usize, n: usize, cut: bool) {
+        let lines: Vec<_> = app.buf().lines[from..from + n].to_vec();
+        if cut {
+            let b = app.buf_mut();
+            b.lines.drain(from..from + n);
+            b.ensure_nonempty();
+        }
+        app.vim.reg = Some(Reg::Lines(lines));
+        app.vim.reg_cut = cut;
+    }
+
+    #[test]
+    fn needs_a_yank_first() {
+        let (_t, mut app) = app_in("xfer-none");
+        app.act(Action::Transfer { copy: false });
+        assert_eq!(app.view, View::Explorer);
+        assert!(app.transfer.is_none());
+    }
+
+    #[test]
+    fn move_yanked_to_picked_folder() {
+        let (t, mut app) = app_in("xfer-move");
+        let r = row_of(&app, "a.txt");
+        yank(&mut app, r, 2, false);
+        app.act(Action::Transfer { copy: false });
+        assert_eq!(app.view, View::Finder);
+        app.finish_transfer(t.0.join("src/deep"), None);
+        let Overlay::Confirm { plan, .. } = &app.overlay else { panic!("no confirm dialog") };
+        assert_eq!(
+            plan.ops,
+            vec![
+                Op::Move { src: t.0.join("a.txt"), dst: t.0.join("src/deep/a.txt"), dir: false },
+                Op::Move { src: t.0.join("b.txt"), dst: t.0.join("src/deep/b.txt"), dir: false },
+            ]
+        );
+        assert!(app.vim.reg.is_none());
+    }
+
+    #[test]
+    fn cut_then_move() {
+        let (t, mut app) = app_in("xfer-cut");
+        let r = row_of(&app, "a.txt");
+        yank(&mut app, r, 1, true);
+        app.act(Action::Transfer { copy: false });
+        app.finish_transfer(t.0.join("src"), None);
+        let Overlay::Confirm { plan, .. } = &app.overlay else { panic!("no confirm dialog") };
+        assert_eq!(plan.ops, vec![Op::Move { src: t.0.join("a.txt"), dst: t.0.join("src/a.txt"), dir: false }]);
+    }
+
+    #[test]
+    fn copy_yanked_into_new_subfolder() {
+        let (t, mut app) = app_in("xfer-copy");
+        let r = row_of(&app, "b.txt");
+        yank(&mut app, r, 1, false);
+        app.act(Action::Transfer { copy: true });
+        app.finish_transfer(t.0.clone(), Some("archive/2026/".into()));
+        let Overlay::Confirm { plan, .. } = &app.overlay else { panic!("no confirm dialog") };
+        assert_eq!(plan.ops, vec![Op::Copy { src: t.0.join("b.txt"), dst: t.0.join("archive/2026/b.txt"), dir: false }]);
+    }
+
+    #[test]
+    fn same_folder_is_a_noop() {
+        let (t, mut app) = app_in("xfer-same");
+        let r = row_of(&app, "a.txt");
+        yank(&mut app, r, 1, false);
+        app.act(Action::Transfer { copy: false });
+        app.finish_transfer(t.0.clone(), None);
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(app.modified_dirs().is_empty());
     }
 }

@@ -51,6 +51,9 @@ pub enum Action {
     YankPath,
     Command(String),
     PreviewScroll(i32),
+    /// Move (`copy: false`) or copy the yanked/cut lines to a folder picked
+    /// with the fuzzy finder.
+    Transfer { copy: bool },
 }
 
 pub struct Vim {
@@ -59,6 +62,8 @@ pub struct Vim {
     pub reg: Option<Reg>,
     pub search: String,
     search_char: Option<(char, char)>,
+    /// The line register came from a cut (dd) rather than a yank (yy).
+    pub reg_cut: bool,
     pub msg: Option<String>,
 }
 
@@ -197,11 +202,24 @@ enum Parse {
 
 impl Default for Vim {
     fn default() -> Self {
-        Vim { mode: Mode::Normal, pending: vec![], reg: None, search: String::new(), search_char: None, msg: None }
+        Vim { mode: Mode::Normal, pending: vec![], reg: None, search: String::new(), search_char: None, reg_cut: false, msg: None }
     }
 }
 
 impl Vim {
+    fn set_lines(&mut self, lines: Vec<Line>, cut: bool) {
+        self.reg = Some(Reg::Lines(lines));
+        self.reg_cut = cut;
+    }
+
+    /// Yanked/cut lines that name entries (what gm/gc would carry).
+    pub fn reg_entries(&self) -> usize {
+        match &self.reg {
+            Some(Reg::Lines(ls)) => ls.iter().filter(|l| l.significant()).count(),
+            _ => 0,
+        }
+    }
+
     pub fn pending_str(&self) -> String {
         self.pending.iter().collect()
     }
@@ -403,13 +421,13 @@ impl Vim {
                 b.snapshot();
                 let cut: Vec<Line> = b.lines.drain(lo..=hi).collect();
                 self.msg = Some(format!("{} line(s) cut — p to paste (moves)", cut.len()));
-                self.reg = Some(Reg::Lines(cut));
+                self.set_lines(cut, true);
                 b.ensure_nonempty();
                 b.row = lo;
                 self.mode = Mode::Normal;
             }
             KeyCode::Char('y') => {
-                self.reg = Some(Reg::Lines(b.lines[lo..=hi].to_vec()));
+                self.set_lines(b.lines[lo..=hi].to_vec(), false);
                 self.msg = Some(format!("{} line(s) yanked — p to paste (copies)", hi - lo + 1));
                 b.row = lo;
                 self.mode = Mode::Normal;
@@ -417,7 +435,7 @@ impl Vim {
             KeyCode::Char('c') => {
                 b.snapshot();
                 let cut: Vec<Line> = b.lines.drain(lo..=hi).collect();
-                self.reg = Some(Reg::Lines(cut));
+                self.set_lines(cut, true);
                 b.lines.insert(lo.min(b.lines.len()), Line::new(""));
                 b.row = lo;
                 b.col = 0;
@@ -582,6 +600,15 @@ impl Vim {
                     'x' => *act = Action::Open(Some(OpenTarget::System)),
                     'y' => *act = Action::YankPath,
                     'p' => *act = Action::TogglePreview,
+                    'm' | 'c' => {
+                        if self.reg_entries() == 0 {
+                            self.msg = Some("yank (yy) or cut (dd) a file or folder first, then gm / gc".into());
+                        } else if d == 'c' && self.reg_cut {
+                            self.msg = Some("cut lines can only be moved — gm (or yy to copy)".into());
+                        } else {
+                            *act = Action::Transfer { copy: d == 'c' };
+                        }
+                    }
                     'f' => *act = Action::Finder(FinderKind::Files),
                     '/' => *act = Action::Finder(FinderKind::Grep),
                     _ => return Parse::Bad,
@@ -721,7 +748,7 @@ impl Vim {
             }
             'Y' => {
                 let e = (b.row + n - 1).min(last);
-                self.reg = Some(Reg::Lines(b.lines[b.row..=e].to_vec()));
+                self.set_lines(b.lines[b.row..=e].to_vec(), false);
                 Parse::Done
             }
             'r' => {
@@ -815,14 +842,14 @@ impl Vim {
         if linewise {
             match op {
                 'y' => {
-                    self.reg = Some(Reg::Lines(b.lines[lo..=hi].to_vec()));
+                    self.set_lines(b.lines[lo..=hi].to_vec(), false);
                     self.msg = Some(format!("{} line(s) yanked", hi - lo + 1));
                 }
                 'd' => {
                     b.snapshot();
                     let cut: Vec<Line> = b.lines.drain(lo..=hi).collect();
                     self.msg = Some(format!("{} line(s) cut — p to paste (moves)", cut.len()));
-                    self.reg = Some(Reg::Lines(cut));
+                    self.set_lines(cut, true);
                     b.ensure_nonempty();
                     b.row = lo;
                 }
@@ -834,7 +861,7 @@ impl Vim {
                         b.cur_mut().text.clear();
                     } else {
                         let cut: Vec<Line> = b.lines.drain(lo..=hi).collect();
-                        self.reg = Some(Reg::Lines(cut));
+                        self.set_lines(cut, true);
                         b.lines.insert(lo.min(b.lines.len()), Line::new(""));
                         b.row = lo;
                     }
@@ -1076,6 +1103,9 @@ mod tests {
         let mut b = buf(&[(Some(1), "a")]);
         let mut v = Vim::default();
         assert_eq!(keys(&mut v, &mut b, "-"), [Action::Parent]);
+        assert_eq!(keys(&mut v, &mut b, "gm"), []); // nothing yanked yet
+        assert_eq!(keys(&mut v, &mut b, "yygm"), [Action::Transfer { copy: false }]);
+        assert_eq!(keys(&mut v, &mut b, "gc"), [Action::Transfer { copy: true }]);
         assert_eq!(keys(&mut v, &mut b, "d\x1b"), []);
         assert_eq!(keys(&mut v, &mut b, "\x1b"), [Action::Quit]);
         assert_eq!(keys(&mut v, &mut b, "ix\x1b"), []);

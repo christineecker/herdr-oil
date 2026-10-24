@@ -41,6 +41,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         View::Viewer => draw_viewer(f, app, main),
     }
     draw_status(f, app, status);
+    if app.view == View::Explorer && matches!(app.overlay, Overlay::None) {
+        draw_keyhint(f, app, main);
+    }
     match &app.overlay {
         Overlay::None => {}
         Overlay::Confirm { .. } => draw_confirm(f, app, area),
@@ -422,6 +425,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let [tabs, prompt, body] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let spin = SPIN[app.spinner % SPIN.len()];
     let preview_on = app.finder_preview && area.width >= 60;
+    let transfer = app.transfer.as_ref().map(|t| (t.copy, t.count));
     let Some(fd) = app.finder.as_mut() else { return };
 
     // tabs
@@ -466,12 +470,20 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
 
     // prompt
     let ph = match fd.kind {
+        _ if transfer.is_some() => "pick the destination folder (a file means its folder)…",
         FinderKind::Grep => "search file contents (ripgrep, smart-case)…",
         FinderKind::Dirs => "fuzzy-find directories…",
         FinderKind::Recent => "recently opened files…",
         FinderKind::Files => "fuzzy-find files  ('exact ^prefix suffix$ !not)",
     };
     let mut ps = vec![Span::styled(" \u{f0349} ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD))];
+    let mut lead_w = 3;
+    if let Some((copy, n)) = transfer {
+        let label = format!(" {} {n} → ", if copy { "COPY" } else { "MOVE" });
+        lead_w += label.width() + 1;
+        ps.push(Span::styled(label, Style::default().fg(Color::Black).bg(if copy { th.blue } else { th.peach }).add_modifier(Modifier::BOLD)));
+        ps.push(Span::raw(" "));
+    }
     if fd.query.is_empty() {
         ps.push(Span::styled(ph, Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
     } else {
@@ -483,7 +495,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(ps)), prompt);
     let qx: usize = fd.query.chars().take(fd.qcur).map(|c| c.to_string().width()).sum();
     if matches!(app.overlay, Overlay::None) {
-        f.set_cursor_position(Position::new(prompt.x + 3 + qx as u16, prompt.y));
+        f.set_cursor_position(Position::new(prompt.x + lead_w as u16 + qx as u16, prompt.y));
     }
 
     let [sep, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
@@ -572,6 +584,66 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
 
 // ── status line ─────────────────────────────────────────────────────────────
 
+/// Which-key style menu: after a prefix key (`g`, `␣`, `Z`) list what can follow.
+pub const KEYHINTS: &[(&str, &[(&str, &str)])] = &[
+    ("g", &[
+        ("g", "first line"),
+        (".", "show/hide hidden files"),
+        ("s", "cycle sort"),
+        ("d", "sizes → details → off"),
+        ("p", "toggle preview"),
+        ("x", "open with system app"),
+        ("y", "copy path"),
+        ("f", "find files"),
+        ("/", "grep"),
+        ("?", "all keys"),
+    ]),
+    (" ", &[("f", "find files"), ("g", "grep"), ("d", "find folders"), ("r", "recent files"), ("␣", "find files")]),
+    ("Z", &[("Z", "apply and quit"), ("Q", "quit, discard edits")]),
+];
+
+fn draw_keyhint(f: &mut Frame, app: &App, area: Rect) {
+    let pend = app.vim.pending_str();
+    let key: String = pend.trim_start_matches(|c: char| c.is_ascii_digit()).to_string();
+    let Some((_, base)) = KEYHINTS.iter().find(|(k, _)| *k == key) else { return };
+    let th = &app.th;
+    // gm / gc only exist while something is yanked or cut
+    let n = app.vim.reg_entries();
+    let (mv, cp) = (format!("move {n} yanked → pick folder"), format!("copy {n} yanked → pick folder"));
+    let mut rows: Vec<(&str, &str)> = Vec::new();
+    if key == "g" && n > 0 {
+        rows.push(("m", mv.as_str()));
+        if !app.vim.reg_cut {
+            rows.push(("c", cp.as_str()));
+        }
+    }
+    rows.extend(base.iter().copied());
+    let label = if key == " " { "␣".to_string() } else { key.clone() };
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(format!(" {label}{k} "), Style::default().fg(th.yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {v} "), Style::default().fg(th.text)),
+            ])
+        })
+        .collect();
+    let w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 2;
+    let h = lines.len() as u16 + 2;
+    let r = Rect {
+        x: area.right().saturating_sub(w + 1),
+        y: area.bottom().saturating_sub(h),
+        width: w.min(area.width),
+        height: h.min(area.height),
+    };
+    f.render_widget(Clear, r);
+    let title = format!("{label}…");
+    let blk = frame(th, &title, th.accent);
+    let inner = blk.inner(r);
+    f.render_widget(blk, r);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.th;
     if let (View::Explorer, Mode::Cmd { kind, text, cur, .. }) = (app.view, &app.vim.mode) {
@@ -605,9 +677,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
         (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("e", "edit here"), ("^v", "split"), ("^t", "tab"), ("y", "copy path"), ("q", "back")],
+        (View::Finder, _) if app.transfer.is_some() => &[("⏎", "here"), ("^n", "new folder from query"), ("⇥", "files/dirs"), ("^r", "root"), ("esc", "cancel")],
         (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^t", "tab"), ("^o", "reveal"), ("⇥", "mode"), ("^r", "root"), ("esc", "back")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
         (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("esc", "cancel")],
+        _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "find"), ("g?", "help"), ("esc", "close")],
+        _ if app.vim.reg_entries() > 0 => &[("⏎", "open"), ("p", "paste"), ("gm", "move yanked to…"), ("gc", "copy yanked to…"), (":w", "apply"), ("g?", "help"), ("esc", "close")],
         _ => &[("⏎", "open"), ("-", "up"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("esc", "close")],
     };
     let mut hs = Vec::new();
@@ -788,6 +863,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("a/b/c.txt", "nested paths create parents"),
         ("dd  {n}dd  V..d", "delete (to Trash by default)"),
         ("dd → - / ⏎ → p", "cut + paste in another dir = move"),
+        ("yy/dd → gm  yy → gc", "move / copy yanked entries to a fuzzy-picked folder"),
         ("yy → p", "duplicate line = copy"),
         ("u  ^r", "undo · redo"),
         (":w  ^s", "review & apply all pending changes"),

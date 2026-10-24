@@ -220,6 +220,10 @@ impl Finder {
         let (hidden, no_ignore, cap) = (self.hidden, self.no_ignore, self.max_files);
         let dirty = self.dirty.clone();
         walking.store(true, Ordering::Relaxed);
+        if dirs {
+            // the root itself, so it can be picked (e.g. as a move target)
+            inj.push("./".to_string(), |s, cols| cols[0] = s.as_str().into());
+        }
         std::thread::spawn(move || {
             let mut wb = ignore::WalkBuilder::new(&root);
             wb.hidden(!hidden)
@@ -423,7 +427,7 @@ impl Finder {
             let abs = if self.kind == FinderKind::Recent {
                 expand_tilde(&s)
             } else {
-                self.root.join(s.trim_end_matches('/'))
+                plan_normalize(&self.root.join(s.trim_end_matches('/')))
             };
             out.push(Item { is_dir: s.ends_with('/'), display: s, abs, line: None, indices: idx, grep_text: None });
         }
@@ -471,6 +475,10 @@ impl Drop for Finder {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn plan_normalize(p: &Path) -> PathBuf {
+    crate::plan::normalize(p)
 }
 
 fn parse_hit(line: &str, root: &Path) -> Option<Hit> {
