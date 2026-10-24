@@ -24,6 +24,16 @@ pub fn cmd(dir: &Path) -> Command {
         "core.quotePath=false",
         "-c",
         "color.ui=false",
+        // a repository's own config could turn on signature checks and
+        // point them at any program
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "gpg.program=false",
+        "-c",
+        "gpg.ssh.program=false",
+        "-c",
+        "gpg.x509.program=false",
         "--no-optional-locks",
         "--no-pager",
     ])
@@ -120,7 +130,7 @@ pub fn log(path: &Path, max: usize) -> Result<Vec<String>, String> {
     let root = guard(path)?;
     let r = rel(&root, path).ok_or("outside the repository")?;
     let mut c = cmd(&root);
-    c.args(["-c", "color.ui=always", "log", "--oneline", "--graph", "--decorate", "--color=always", "--date=short", "--format=%C(yellow)%h%C(reset) %C(dim)%ad%C(reset) %s %C(blue)%an%C(reset)%C(auto)%d"])
+    c.args(["-c", "color.ui=always", "log", "--no-show-signature", "--oneline", "--graph", "--decorate", "--color=always", "--date=short", "--format=%C(yellow)%h%C(reset) %C(dim)%ad%C(reset) %s %C(blue)%an%C(reset)%C(auto)%d"])
         .arg(format!("-n{max}"))
         .args(["--", &r]);
     let out = run(c)?;
