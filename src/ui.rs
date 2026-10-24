@@ -1017,9 +1017,9 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// A Projects row: recent `▎` and open-workspace `▶` markers, stack icon,
-/// name (parent dimmed), time since the last hop, branch, `●N` changes /
-/// `↑N` unpushed / `○` clean, agents and their state, `◆` the project oil
-/// was opened in. `key` is the matched string (name, two spaces, branch).
+/// name (parent dimmed) with `◆` on the project oil was opened in, time
+/// since the last hop, branch, `●N` changes / `↑N` unpushed / `○` clean,
+/// agents and their state. `key` is the matched string (name, two spaces, branch).
 fn project_row(th: &crate::theme::Theme, p: &crate::projects::Proj, key: &str, idx: &[u32], w: usize, hl: Style) -> Vec<Span<'static>> {
     let mut sp = vec![
         Span::styled(if p.hopped.is_some() { "▎" } else { " " }, Style::default().fg(th.accent)),
@@ -1034,8 +1034,13 @@ fn project_row(th: &crate::theme::Theme, p: &crate::projects::Proj, key: &str, i
     let pick = |lo: u32, hi: u32| -> Vec<u32> { if aligned { idx.iter().copied().filter(|&i| i >= lo && i < hi).map(|i| i - lo).collect() } else { vec![] } };
     sp.extend(highlight(dpart, &pick(0, dir_chars), Style::default().fg(th.subtext), hl));
     sp.extend(highlight(fpart, &pick(dir_chars, name_chars), Style::default().fg(th.text).add_modifier(Modifier::BOLD), hl));
-    let col = (w / 3).clamp(16, 32);
-    sp.push(Span::raw(" ".repeat(col.saturating_sub(p.name.width()) + 1)));
+    let col = if w < 80 { (w / 4).max(14) } else { (w / 3).min(32) };
+    let mut used = p.name.width();
+    if p.here {
+        sp.push(Span::styled(" ◆", Style::default().fg(th.teal)));
+        used += 2;
+    }
+    sp.push(Span::raw(" ".repeat(col.saturating_sub(used) + 1)));
     let age = p.hopped.map(|t| {
         let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(t);
         let fresh = at.elapsed().is_ok_and(|d| d.as_secs() < 600);
@@ -1048,14 +1053,14 @@ fn project_row(th: &crate::theme::Theme, p: &crate::projects::Proj, key: &str, i
     match &p.head {
         Some(h) => {
             let c = if h.detached { th.peach } else { th.green };
-            let shown: String = h.name.chars().take(18).collect();
+            let shown: String = h.name.chars().take(14).collect();
             sp.extend(highlight(&shown, &pick(name_chars + 2, u32::MAX), Style::default().fg(c), hl));
-            sp.push(Span::raw(" ".repeat(18usize.saturating_sub(shown.width()) + 1)));
+            sp.push(Span::raw(" ".repeat(14usize.saturating_sub(shown.width()) + 1)));
             if let Some(r) = &h.worktree_of {
                 sp.push(Span::styled(format!("({r}) "), Style::default().fg(th.dim)));
             }
         }
-        None => sp.push(Span::styled(format!("{:<19}", "—"), Style::default().fg(th.dim))),
+        None => sp.push(Span::styled(format!("{:<15}", "—"), Style::default().fg(th.dim))),
     }
     match p.dirty {
         Some((0, 0)) => sp.push(Span::styled("○", Style::default().fg(th.dim))),
@@ -1075,10 +1080,7 @@ fn project_row(th: &crate::theme::Theme, p: &crate::projects::Proj, key: &str, i
             "waiting" => th.yellow,
             _ => th.dim,
         };
-        sp.push(Span::styled(format!("  {} \u{25b6} {}", ws.agents, ws.status), Style::default().fg(c)));
-    }
-    if p.here {
-        sp.push(Span::styled("  ◆ here", Style::default().fg(th.teal)));
+        sp.push(Span::styled(format!(" {}\u{25b6} {}", ws.agents, ws.status), Style::default().fg(c)));
     }
     sp
 }

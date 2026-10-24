@@ -89,16 +89,17 @@ shares its `recent.tsv`, so hopping from either plugin ranks the same; a
 `recent_file`). Without herdr-hop the defaults are `~/Projects`, depth 2.
 
 ```
-▌▎▶  herdr-oil        2m   main              ●3  2 ▶ working  ◆ here
- ▎   herdr-hop        1h   main              ○
-  ▶  wgas-wiki             main
-     paper-rag             wiki_dev
+▌▎▶  atlas ◆        2m   main           ●3 1▶ working
+ ▎▶  site           3h   main           ○ 1▶ idle
+ ▎   notes-wiki     1d   main           ○
+  ▶  atlas-render        fix/render     (atlas) ○ 1▶ waiting
+     ledger              feat/import
 ```
 
 `▎` recent · `▶` open workspace · stack icon · time since the hop · branch
 (peach when detached, `(repo)` for linked worktrees) · `●N` changed /
-`↑N` unpushed / `○` clean (recent and open rows) · agents · `◆` the project
-oil was opened in. Branch names are searchable. The preview shows the
+`↑N` unpushed / `○` clean (recent and open rows) · agents. `◆` after the
+name marks the project oil was opened in. Branch names are searchable. The preview shows the
 workspace, branch with upstream, changed files, the last commits,
 worktrees, then the folder and its README.
 

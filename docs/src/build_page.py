@@ -141,6 +141,9 @@ SCREENS = [
     ("07-grep", "Grep", "Live ripgrep",
      "Grep mode re-runs ripgrep as you type, debounced. The preview jumps to the hit line.",
      ["⇥ ⇥", "TODO"]),
+    ("13-projects", "Projects", "Hop to a project",
+     "The Projects tab lists every project under herdr-hop's roots: recent hops first (▎), then open workspaces (▶), then the rest. Rows carry the branch, changed files and agents; ◆ marks the project oil was opened in. Enter jumps to the workspace and tab open there, or creates one. Captured with a stub herdr in a sample home.",
+     ["␣p"]),
     ("08-viewer", "Viewer", "Read it inside oil",
      "Enter shows the file in the oil window, highlighted and scrollable, opened at the grep hit. e edits it in $EDITOR inside the same popup; q goes back to where you came from.",
      ["⏎"]),
@@ -161,7 +164,7 @@ def screens():
     return res
 
 
-ORDER = ["main.rs", "app.rs", "buffer.rs", "vim.rs", "plan.rs", "apply.rs", "finder.rs", "preview.rs", "open.rs", "launch.rs", "entry.rs", "config.rs", "ui.rs", "theme.rs"]
+ORDER = ["main.rs", "app.rs", "buffer.rs", "vim.rs", "plan.rs", "apply.rs", "finder.rs", "projects.rs", "preview.rs", "open.rs", "launch.rs", "entry.rs", "config.rs", "ui.rs", "theme.rs"]
 ROLE = {
     "main.rs": "entry point, CLI flags, terminal setup",
     "app.rs": "state, event loop, save/quit flow, finder keys",
@@ -169,7 +172,8 @@ ROLE = {
     "vim.rs": "modal editing: counts, operators, motions, text objects",
     "plan.rs": "buffer diff → create/move/copy/delete + validation",
     "apply.rs": "staged execution, trash, cross-device fallback",
-    "finder.rs": "nucleo matcher, ignore walker, ripgrep, recent",
+    "finder.rs": "nucleo matcher, ignore walker, ripgrep, recent, finder tabs",
+    "projects.rs": "Projects tab: index, recent hops, herdr workspaces, hop",
     "preview.rs": "bat preview, ANSI parser, dir listings",
     "open.rs": "editor argv, split/tab/origin/popup hand-off",
     "launch.rs": "herdr CLI: focused pane, popup open, pane ids",
