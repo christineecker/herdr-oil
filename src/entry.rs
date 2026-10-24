@@ -354,8 +354,35 @@ pub enum IconColor {
 
 /// One-letter git status per direct child of `dir` (dirs aggregate their
 /// contents). Empty map when not in a repo or git is unavailable.
+/// True when any config git would read for `dir` defines a clean/smudge/
+/// process filter outside the user's own global/system files. `git status`
+/// may run clean filters, so a repository that carries its own config (an
+/// unpacked archive, a shared folder; local, worktree or included files)
+/// could make us execute arbitrary commands. Reading config never runs filters.
+fn repo_defines_filters(dir: &Path) -> bool {
+    let out = std::process::Command::new("git")
+        .args(["config", "--list", "--show-scope", "--includes", "--name-only"])
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(o) = out else { return true };
+    if !o.status.success() {
+        // not a repository (status would fail anyway) or unreadable config
+        return !o.stdout.is_empty();
+    }
+    String::from_utf8_lossy(&o.stdout).lines().any(|l| {
+        let (scope, key) = l.split_once('\t').unwrap_or(("", l));
+        let key = key.to_ascii_lowercase();
+        let filter = key.starts_with("filter.") && (key.ends_with(".clean") || key.ends_with(".smudge") || key.ends_with(".process"));
+        filter && !matches!(scope, "global" | "system" | "command")
+    })
+}
+
 pub fn git_status(dir: &Path) -> HashMap<String, char> {
     let mut map = HashMap::new();
+    if repo_defines_filters(dir) {
+        return map;
+    }
     let out = std::process::Command::new("git")
         .args([
             "-c",
@@ -453,6 +480,30 @@ mod tests {
         assert_eq!(human_size(512), "512B");
         assert_eq!(human_size(1536), "1.5K");
         assert_eq!(human_size(50 * 1024 * 1024), "50M");
+    }
+
+    #[test]
+    fn skips_repos_with_local_filters() {
+        let t = std::env::temp_dir().join(format!("herdr-oil-git-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(&t).unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&t).output().unwrap();
+        git(&["init", "-q"]);
+        fs::write(t.join("a.txt"), "x").unwrap();
+        assert_eq!(git_status(&t).get("a.txt"), Some(&'?'));
+        let marker = t.join("pwned");
+        git(&["config", "filter.evil.clean", &format!("touch {}", marker.display())]);
+        fs::write(t.join(".gitattributes"), "* filter=evil\n").unwrap();
+        assert!(git_status(&t).is_empty());
+        assert!(!marker.exists());
+        // worktree-scoped config is just as untrusted
+        git(&["config", "--unset", "filter.evil.clean"]);
+        assert_eq!(git_status(&t).get("a.txt"), Some(&'?'));
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        git(&["config", "--worktree", "filter.evil.process", &format!("touch {}", marker.display())]);
+        assert!(git_status(&t).is_empty());
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(&t);
     }
 
     #[test]
