@@ -993,6 +993,12 @@ impl App {
     /// `ge`: hand this listing to `$EDITOR` as `/001 name` lines (the number
     /// keeps the entry identity, like oil.nvim), read it back after.
     fn edit_buffer(&mut self) {
+        // one line per entry: a name with a newline would come back as an
+        // extra (possibly tagged) line and stage edits nobody typed
+        if self.buf().lines.iter().any(|l| l.text.chars().any(char::is_control)) {
+            self.flash("a name here contains control characters — ge is off for this folder", MsgKind::Err);
+            return;
+        }
         let mut table = Vec::new();
         let mut text = String::new();
         for l in &self.buf().lines {
@@ -2588,6 +2594,17 @@ mod tests {
         // one undo step brings the listing back
         app.buf_mut().undo();
         assert!(app.modified_dirs().is_empty());
+    }
+
+    #[test]
+    fn edit_listing_refuses_control_characters() {
+        // a link target with a newline would come back as a forged tagged line
+        let (t, mut app) = app_in("ebuf-ctl");
+        std::os::unix::fs::symlink("x\n/001 evil", t.0.join("trap")).unwrap();
+        app.act(Action::Refresh);
+        assert!(app.buf().lines.iter().any(|l| l.text.contains('\n')));
+        app.act(Action::EditBuffer);
+        assert!(app.edit_file.is_none() && app.suspend.is_none());
     }
 
     #[test]
