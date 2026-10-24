@@ -1,0 +1,1368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>herdr-oil · Feature Updates & UI Mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<style>
+:root {
+  --bg: #141918;
+  --surface: #1b2120;
+  --sunk: #111514;
+  --fg: #e5ecea;
+  --muted: #94a5a2;
+  --line: #2b3533;
+  --accent: #4eaab7;
+  --accent-soft: #17383c;
+  --add: #7bd88f;
+  --ren: #fce566;
+  --mov: #948ae3;
+  --del: #fc618d;
+  --peach: #fd9353;
+  --teal: #5ad4e6;
+  --term-bg: #22232b;
+  --term-chrome: #191a20;
+  --term-surface: #313244;
+  --term-sel: #3a3a4a;
+  --term-fg: #f7f1ff;
+  --term-sub: #b8b3bf;
+  --term-dim: #6e6a86;
+  --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", sans-serif;
+  --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --radius: 10px;
+  color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg: #edf1f0;
+  --surface: #ffffff;
+  --sunk: #e3e9e7;
+  --fg: #152120;
+  --muted: #566866;
+  --line: #cfd9d6;
+  --accent: #127481;
+  --accent-soft: #d6ecee;
+  --add: #24804a;
+  --ren: #8a6a00;
+  --mov: #5b4cc4;
+  --del: #b8154f;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 var(--body);
+  margin: 0;
+  padding: 0 20px 80px;
+}
+.wrap {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: grid;
+  gap: 56px;
+}
+header.hero {
+  padding-top: 42px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 24px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 28px;
+}
+.eyebrow {
+  font: 600 .75rem/1 var(--mono);
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+h1, h2, h3 {
+  font-family: var(--display);
+  margin: 0;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+h1 { font-size: clamp(2.1rem, 4.5vw, 3.2rem); font-weight: 800; }
+h2 { font-size: 1.55rem; font-weight: 700; }
+h3 { font-size: 1.08rem; font-weight: 700; }
+p { margin: 0; }
+code, kbd { font-family: var(--mono); font-size: .88em; }
+kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--fg);
+  font-size: .8rem;
+  line-height: 1.3;
+}
+.btn {
+  font: 600 .8rem/1 var(--mono);
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn.active { background: var(--accent); color: #111; border-color: var(--accent); }
+
+/* Mockup Selector Tabs */
+.showcase {
+  display: grid;
+  gap: 20px;
+}
+.tab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--sunk);
+  padding: 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+.tab-btn {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: 600 .86rem/1.2 var(--body);
+  cursor: pointer;
+  text-align: left;
+  transition: all .15s;
+}
+.tab-btn .num {
+  font: 700 .72rem/1 var(--mono);
+  padding: 3px 6px;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.06);
+  color: var(--muted);
+}
+.tab-btn:hover { color: var(--fg); background: rgba(255,255,255,0.03); }
+.tab-btn[aria-selected="true"] {
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  border: 1px solid var(--line);
+}
+.tab-btn[aria-selected="true"] .num {
+  background: var(--accent);
+  color: #111;
+}
+
+.mockup-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+.mockup-desc {
+  display: grid;
+  gap: 4px;
+  max-width: 72ch;
+}
+.mockup-desc p { color: var(--muted); font-size: .94rem; }
+.compare-toggle {
+  display: inline-flex;
+  background: var(--sunk);
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+.compare-toggle button {
+  font: 600 .78rem/1 var(--mono);
+  padding: 7px 12px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.compare-toggle button.active {
+  background: var(--accent);
+  color: #111;
+}
+
+/* Terminal Plate */
+.plate {
+  border-radius: var(--radius);
+  background: var(--term-bg);
+  color: var(--term-fg);
+  overflow: hidden;
+  box-shadow: 0 22px 60px -20px rgba(0,0,0,0.65);
+  border: 1px solid #353746;
+}
+.plate-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px;
+  background: var(--term-chrome);
+  font: 500 12px/1 var(--mono);
+  color: var(--term-dim);
+  border-bottom: 1px solid #2b2c37;
+}
+.plate-bar .left { display: flex; align-items: center; gap: 10px; }
+.lights { display: flex; gap: 6px; }
+.lights i { width: 10px; height: 10px; border-radius: 50%; display: block; background: #3a3a48; }
+.lights i:nth-child(1) { background: #fc618d; opacity: .75; }
+.lights i:nth-child(2) { background: #fce566; opacity: .75; }
+.lights i:nth-child(3) { background: #7bd88f; opacity: .75; }
+.plate-bar .ttl { color: var(--term-fg); font-weight: 600; }
+.plate-bar .badge {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: rgba(78, 170, 183, 0.16);
+  color: #4eaab7;
+}
+.plate-bar .badge.before {
+  background: rgba(110, 106, 134, 0.25);
+  color: #b8b3bf;
+}
+
+/* TUI Layout inside Terminal */
+.tui {
+  font: 400 13.5px/1.42 var(--mono);
+  min-height: 410px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  user-select: none;
+}
+.tui-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--term-bg);
+  white-space: pre;
+  overflow-x: auto;
+}
+.tui-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 48% 52%;
+  min-height: 350px;
+}
+.tui-body.full {
+  grid-template-columns: 1fr;
+}
+.tui-list {
+  border-right: 1px solid var(--term-dim);
+  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.tui-prev {
+  padding: 2px 0 2px 10px;
+  overflow: hidden;
+}
+.tui-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 8px 0 4px;
+  white-space: pre;
+}
+.tui-row.sel { background: var(--term-sel); }
+.tui-row.vis { background: var(--term-surface); }
+.tui-status {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 8px 2px 0;
+  background: var(--term-bg);
+  border-top: 1px solid #2b2c37;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* TUI Colors */
+.c-acc { color: #4eaab7; }
+.c-txt { color: #f7f1ff; }
+.c-sub { color: #b8b3bf; }
+.c-dim { color: #6e6a86; }
+.c-grn { color: #7bd88f; }
+.c-yel { color: #fce566; }
+.c-blu { color: #948ae3; }
+.c-red { color: #fc618d; }
+.c-pch { color: #fd9353; }
+.c-tel { color: #5ad4e6; }
+.b { font-weight: 700; }
+.it { font-style: italic; }
+.rev { background: #f7f1ff; color: #22232b; }
+.pill-oil { background: #4eaab7; color: #000; font-weight: 700; padding: 0 6px; }
+.pill-cmd { background: #fce566; color: #000; font-weight: 700; padding: 0 6px; }
+.pill-find { background: #948ae3; color: #000; font-weight: 700; padding: 0 6px; }
+.pill-view { background: #5ad4e6; color: #000; font-weight: 700; padding: 0 6px; }
+.tab-active { background: #4eaab7; color: #000; font-weight: 700; padding: 0 6px; border-radius: 2px; }
+.diff-del { background: rgba(252, 97, 141, 0.25); color: #fc618d; text-decoration: line-through; padding: 0 2px; border-radius: 2px; }
+.diff-add { background: rgba(123, 216, 143, 0.25); color: #7bd88f; font-weight: 700; padding: 0 2px; border-radius: 2px; }
+.hl-match { background: rgba(252, 229, 102, 0.28); color: #fce566; font-weight: 700; border-bottom: 1px solid #fce566; }
+.new-callout {
+  outline: 1px dashed rgba(90, 212, 230, 0.55);
+  background: rgba(90, 212, 230, 0.06);
+  border-radius: 3px;
+}
+
+/* Modal Overlay inside TUI */
+.tui-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 16, 20, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.tui-modal {
+  background: #26262e;
+  border: 2px solid #4eaab7;
+  border-radius: 8px;
+  min-width: 580px;
+  max-width: 92%;
+  padding: 10px 14px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.7);
+}
+.tui-modal.danger { border-color: #fc618d; }
+.tui-modal-title {
+  margin-top: -21px;
+  margin-bottom: 8px;
+  display: inline-block;
+  background: #26262e;
+  padding: 0 8px;
+  font-weight: 700;
+}
+
+/* Annotations under terminal */
+.callouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+.callout {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 4px;
+}
+.callout .tag {
+  font: 700 .72rem/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  color: var(--accent);
+}
+.callout p { color: var(--muted); font-size: .88rem; }
+
+/* Interactive Sandbox */
+.sandbox-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 20px;
+}
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+.cmd-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.cmd-input-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  background: var(--term-bg);
+  border: 1px solid #3c3e4f;
+  border-radius: 6px;
+  padding: 0 10px;
+  font-family: var(--mono);
+  color: var(--term-fg);
+}
+.cmd-input-wrap span { color: var(--accent); font-weight: 700; margin-right: 4px; }
+.cmd-input-wrap input {
+  background: transparent;
+  border: none;
+  color: var(--term-fg);
+  font: 500 .9rem/1 var(--mono);
+  padding: 9px 4px;
+  width: 100%;
+  outline: none;
+}
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  font: 500 .76rem/1 var(--mono);
+  padding: 6px 9px;
+  border-radius: 5px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--fg); }
+
+/* Feature Matrix Cards */
+.matrix {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+}
+.fcard {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  transition: border-color .15s;
+}
+.fcard:hover { border-color: var(--accent); }
+.fcard-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.pill {
+  font: 700 .68rem/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+  padding: 4px 7px;
+  border-radius: 4px;
+}
+.pill.func { background: rgba(123, 216, 143, 0.14); color: var(--add); }
+.pill.vis { background: rgba(252, 229, 102, 0.14); color: var(--ren); }
+.pill.ux { background: rgba(148, 138, 227, 0.16); color: var(--mov); }
+.effort {
+  font: 500 .74rem/1 var(--mono);
+  color: var(--muted);
+}
+.fcard p { color: var(--muted); font-size: .92rem; }
+.fcard .files-ref {
+  font: 500 .76rem/1.3 var(--mono);
+  color: var(--accent);
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+
+@media (max-width: 900px) {
+  .tui-body, .sandbox-grid { grid-template-columns: 1fr; }
+  .tui-list { border-right: none; border-bottom: 1px solid var(--term-dim); }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <!-- HERO -->
+  <header class="hero">
+    <div style="display:grid;gap:10px">
+      <span class="eyebrow">herdr-oil · Interactive Design Review</span>
+      <h1>Feature Updates &amp; UI Mockups</h1>
+      <p style="color:var(--muted);max-width:68ch">
+        Visualizing proposed enhancements across <b>bulk buffer operations</b>, <b>inline diff cues</b>,
+        <b>richer finder modes &amp; previews</b>, and <b>navigation ergonomics</b>. Toggle between <em>Proposed</em> and <em>Current (v0.1.0)</em> on any screen.
+      </p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="btn" id="theme-btn" type="button">Toggle Light/Dark Page</button>
+    </div>
+  </header>
+
+  <!-- SECTION 1: INTERACTIVE TERMINAL MOCKUPS -->
+  <section class="showcase">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:12px">
+      <div>
+        <span class="eyebrow">01 · TUI Screen Mockups</span>
+        <h2>See how proposed improvements look in the popup</h2>
+      </div>
+      <span style="font:500 .8rem/1 var(--mono);color:var(--muted)">Keys <kbd>1</kbd>–<kbd>6</kbd> switch screens · <kbd>Space</kbd> toggles Before/After</span>
+    </div>
+
+    <div class="tab-bar" role="tablist" id="screen-tabs">
+      <button class="tab-btn" role="tab" aria-selected="true" data-screen="0">
+        <span class="num">1</span>
+        <div><b>Explorer Inline Diffs</b><br><span style="font-size:.76rem;opacity:.75">← orig name, deleted footer, symlinks</span></div>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-screen="1">
+        <span class="num">2</span>
+        <div><b>Bulk :%s &amp; Tab-Complete</b><br><span style="font-size:.76rem;opacity:.75">Regex rename, :chmod +x, path completion</span></div>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-screen="2">
+        <span class="num">3</span>
+        <div><b>Char-Diff Confirm Modal</b><br><span style="font-size:.76rem;opacity:.75">Highlighted spans + Undo-Apply</span></div>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-screen="3">
+        <span class="num">4</span>
+        <div><b>Finder: Git Mode &amp; Globs</b><br><span style="font-size:.76rem;opacity:.75">5th Git tab, rg globs, Send-to-Agent</span></div>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-screen="4">
+        <span class="num">5</span>
+        <div><b>Rich Previews</b><br><span style="font-size:.76rem;opacity:.75">Archive trees, Dir README, SQLite schema</span></div>
+      </button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-screen="5">
+        <span class="num">6</span>
+        <div><b>Viewer Search &amp; Marks</b><br><span style="font-size:.76rem;opacity:.75">/search + n/N in viewer, dir bookmarks</span></div>
+      </button>
+    </div>
+
+    <div class="mockup-header">
+      <div class="mockup-desc">
+        <h3 id="mock-title">1. Explorer: Inline Rename Origins, Pending Deletions Footer &amp; Editable Symlinks</h3>
+        <p id="mock-sub">When renaming a line or deleting entries with <code>dd</code>, show the original filename inline (<code>← report.md</code>), surface pending deletions at the bottom of the buffer, and allow editing symlink targets directly via <code>-></code>.</p>
+      </div>
+      <div class="compare-toggle" role="group" aria-label="Comparison">
+        <button type="button" class="active" data-mode="after">Proposed (v0.2)</button>
+        <button type="button" data-mode="before">Current (v0.1)</button>
+      </div>
+    </div>
+
+    <!-- TERMINAL PLATE -->
+    <div class="plate">
+      <div class="plate-bar">
+        <div class="left">
+          <span class="lights"><i></i><i></i><i></i></span>
+          <span class="ttl" id="plate-title">Oil · ~/Projects/herdr-oil/src</span>
+        </div>
+        <span class="badge" id="plate-badge">PROPOSED MOCKUP</span>
+      </div>
+      <div id="tui-viewport"></div>
+    </div>
+
+    <!-- CALLOUTS -->
+    <div class="callouts" id="mock-callouts"></div>
+  </section>
+
+  <!-- SECTION 2: INTERACTIVE BULK RENAME & EX SANDBOX -->
+  <section style="display:grid;gap:20px">
+    <div>
+      <span class="eyebrow">02 · Interactive Sandbox</span>
+      <h2>Try Proposed <code>:%s</code> Bulk Rename, <code>:chmod</code>, Symlinks &amp; Inline Diffs</h2>
+      <p style="color:var(--muted);max-width:72ch">
+        Edit any buffer line below or run a proposed <code>:</code> command (or click a preset) to see how inline <code>← original</code> badges, symlink retargeting, and character-level diffing behave live.
+      </p>
+    </div>
+
+    <div class="sandbox-grid">
+      <!-- Left: Editable Buffer -->
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <h3>Buffer: <code>~/Projects/atlas/</code></h3>
+          <div style="display:flex;gap:6px">
+            <button class="btn" id="sb-undo" type="button">u Undo</button>
+            <button class="btn" id="sb-reset" type="button">:e! Reset</button>
+          </div>
+        </div>
+
+        <div class="cmd-bar">
+          <div class="cmd-input-wrap">
+            <span>:</span>
+            <input id="sb-cmd" type="text" value="%s/draft/final/g" aria-label="Ex command">
+          </div>
+          <button class="btn active" id="sb-run" type="button">Run Ex</button>
+        </div>
+
+        <div class="preset-chips">
+          <button class="chip" type="button" data-cmd="%s/draft/final/g">:%s/draft/final/g</button>
+          <button class="chip" type="button" data-cmd="%s/\.jpeg$/.jpg/">:%s/\.jpeg$/.jpg/</button>
+          <button class="chip" type="button" data-cmd="prefix 2026_">:prefix 2026_</button>
+          <button class="chip" type="button" data-cmd="chmod +x deploy.sh">:chmod +x deploy.sh</button>
+          <button class="chip" type="button" data-cmd="ln config.prod.toml current.toml">:ln config.prod.toml current.toml</button>
+        </div>
+
+        <div id="sb-rows" style="display:grid;gap:6px;font-family:var(--mono);font-size:.88rem"></div>
+        <div id="sb-deleted-footer" style="font:500 .82rem/1.4 var(--mono);color:var(--del);padding:8px 10px;background:rgba(252,97,141,0.08);border:1px dashed rgba(252,97,141,0.35);border-radius:6px;display:none"></div>
+      </div>
+
+      <!-- Right: Live Diff & Plan Preview -->
+      <div class="panel">
+        <div style="display:flex;justify-content:space-between;align-items:baseline">
+          <h3>Live Staged Plan (with Char-Diffs)</h3>
+          <span style="font:500 .78rem/1 var(--mono);color:var(--muted)" id="sb-count">0 operations</span>
+        </div>
+        <div id="sb-plan" style="display:grid;gap:8px;font:500 .86rem/1.45 var(--mono);background:var(--term-bg);padding:14px;border-radius:8px;border:1px solid #353746;min-height:220px;align-content:start"></div>
+        <p style="font-size:.83rem;color:var(--muted)">
+          Notice how character-level diffs highlight only the mutated span (<span class="diff-del">draft</span> → <span class="diff-add">final</span>), making large batch renames safe to verify at a glance.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 3: ALL SUGGESTIONS MATRIX -->
+  <section style="display:grid;gap:20px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px">
+      <div>
+        <span class="eyebrow">03 · Complete Roadmap Reference</span>
+        <h2>All Proposed Improvements</h2>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap" id="filter-btns">
+        <button class="btn active" type="button" data-filter="all">All (19)</button>
+        <button class="btn" type="button" data-filter="func">Functionality (10)</button>
+        <button class="btn" type="button" data-filter="vis">Visualization (5)</button>
+        <button class="btn" type="button" data-filter="ux">Ease of Use &amp; Perf (4)</button>
+      </div>
+    </div>
+
+    <div class="matrix" id="feature-matrix"></div>
+  </section>
+
+</div>
+
+<script>
+const SCREENS = [
+  {
+    title: "1. Explorer: Inline Rename Origins, Pending Deletions Footer & Editable Symlinks",
+    sub: "When renaming a line or deleting entries with dd, show the original filename inline (← report-draft.md), surface pending deletions at the bottom of the buffer, and allow editing symlink targets directly via ->.",
+    plateTitle: "Oil · ~/Projects/herdr-oil/src  (H/L history · 'a marks)",
+    callouts: [
+      { tag: "Inline Rename Origin", text: "Modified lines show `← old_name` in dimmed virtual text so you never lose track of which file is being renamed." },
+      { tag: "Deleted Entries Bar", text: "Instead of only showing `−2` in the top bar, a dimmed virtual footer lists deleted filenames (`old_notes.txt`, `tmp/`) right in the directory." },
+      { tag: "Editable Symlinks & chmod", text: "Symlinks render as `current.toml -> config.dev.toml` in the buffer text so changing `dev` to `prod` retargets the link on `:w`." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/</span><span class="c-txt b">atlas</span><span class="c-yel b"> [+]</span>  <span class="c-dim">pending</span> <span class="c-grn b">+1</span> <span class="c-yel b">~2</span> <span class="c-red b">−2</span>  <span class="c-acc">:w</span></span><span class="c-dim">‹H L› · mark:'a · ↑name · details </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-acc">󰉋</span> <span class="c-acc b">src/</span></span><span class="c-dim">drwxr-xr-x    8 items    2h</span></div>
+                <div class="tui-row sel new-callout"><span class="c-txt"><span class="c-yel b">~</span><span class="c-yel">M</span> <span class="c-txt">󰈙</span> report-<span class="rev">f</span>inal.md <span class="c-dim it">← report-draft.md</span></span><span class="c-dim">-rw-r--r--      14.2K    5m</span></div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-tel">󰌷</span> current.toml <span class="c-tel">-> config.prod.toml</span> <span class="c-dim it">← config.dev.toml</span></span><span class="c-dim">lrwxr-xr-x        24B    1d</span></div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-grn b">+</span>  <span class="c-grn"></span> <span class="c-grn">deploy.sh</span> <span class="c-pch">[+x]</span></span><span class="c-dim">-rwxr-xr-x        new   now</span></div>
+                <div class="tui-row"><span class="c-txt"> <span class="c-grn">A</span> <span class="c-pch"></span> Cargo.toml</span><span class="c-dim">-rw-r--r--       612B    3d</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-yel">󰂺</span> README.md</span><span class="c-dim">-rw-r--r--       4.8K    4d</span></div>
+              </div>
+              <div class="tui-row new-callout" style="border-top:1px dashed #3a3a4a;padding-top:4px;margin-top:8px">
+                <span class="c-red">  ── 2 pending deletes in this dir: <span class="b">old_notes.txt</span>, <span class="b">tmp_cache/</span>  <span class="c-dim">(u to undo)</span></span><span></span>
+              </div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> report-final.md  <span class="c-dim">14.2K  5m  (renamed from report-draft.md)</span></div>
+              <div class="c-dim">   1 <span class="c-blu b"># Q4 Architecture Report</span></div>
+              <div class="c-dim">   2 </div>
+              <div class="c-dim">   3 <span class="c-txt">The directory listing is an ordinary editable buffer</span></div>
+              <div class="c-dim">   4 <span class="c-txt">where every line carries a hidden entry id.</span></div>
+              <div class="c-dim">   5 </div>
+              <div class="c-dim">   6 <span class="c-grn">## Summary of Changes</span></div>
+              <div class="c-dim">   7 <span class="c-txt">- Zero overwrites guaranteed during staging</span></div>
+              <div class="c-dim">   8 <span class="c-txt">- Deepest-first move and delete ordering</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span> <span class="c-sub">2 renamed, 1 created (+x), 2 deleted</span></span><span><span class="c-acc">H/L</span> <span class="c-dim">back/fwd</span> <span class="c-acc">ma/'a</span> <span class="c-dim">mark</span> <span class="c-acc">:w</span> <span class="c-dim">apply</span> <span class="c-acc">U</span> <span class="c-dim">undo-apply</span></span></div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/</span><span class="c-txt b">atlas</span><span class="c-yel b"> [+]</span>  <span class="c-dim">pending</span> <span class="c-grn b">+1</span> <span class="c-yel b">~1</span> <span class="c-red b">−2</span>  <span class="c-acc">:w</span></span><span class="c-dim">name · details </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-acc">󰉋</span> <span class="c-acc b">src/</span></span><span class="c-dim">drwxr-xr-x    8 items    2h</span></div>
+                <div class="tui-row sel"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-txt">󰈙</span> report-<span class="rev">f</span>inal.md</span><span class="c-dim">-rw-r--r--      14.2K    5m</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰌷</span> current.toml <span class="c-dim">→ config.dev.toml</span></span><span class="c-dim">lrwxr-xr-x        24B    1d</span></div>
+                <div class="tui-row"><span class="c-txt"><span class="c-grn b">+</span>  <span class="c-txt">󰈔</span> <span class="c-grn">deploy.sh</span></span><span class="c-dim"></span></div>
+                <div class="tui-row"><span class="c-txt"> <span class="c-grn">A</span> <span class="c-pch"></span> Cargo.toml</span><span class="c-dim">-rw-r--r--       612B    3d</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-yel">󰂺</span> README.md</span><span class="c-dim">-rw-r--r--       4.8K    4d</span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-dim">  no preview (cur_entry returns None while line is edited)</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span></span><span><span class="c-acc">⏎</span> <span class="c-dim">open</span> <span class="c-acc">-</span> <span class="c-dim">up</span> <span class="c-acc">:w</span> <span class="c-dim">apply</span> <span class="c-acc">⇥</span> <span class="c-dim">find</span> <span class="c-acc">g?</span> <span class="c-dim">help</span></span></div>
+      </div>
+    `
+  },
+  {
+    title: "2. Bulk :%s Substitution, Live Preview & Command-Line Tab Completion",
+    sub: "Type :%s/pattern/replacement/g with live inline preview in the buffer, or press <Tab> on :cd / :chmod / :ln for popup completion candidates.",
+    plateTitle: "Oil · ~/Projects/herdr-oil/assets",
+    callouts: [
+      { tag: "Live :%s Substitution", text: "Typing `:%s/IMG_(\\d+)\\.jpeg/photo_$1.jpg/` highlights matches and previews the renamed filenames in real time before pressing Enter." },
+      { tag: "Ex Command Tab Completion", text: "Pressing `<Tab>` in `:` mode completes paths (`:cd src/co<Tab>`) and ex verbs (`:chmod`, `:prefix`, `:suffix`, `:ln`, `:undo-apply`)." },
+      { tag: "Preview Kept Alive During Rename", text: "Even after a line's name is edited, `herdr-oil` uses `line.id` to keep showing the file's preview on the right instead of `no preview`." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/atlas/</span><span class="c-txt b">assets</span><span class="c-yel b"> [+]</span>  <span class="c-dim">live :%s preview (4 matches)</span></span><span class="c-dim">↑name · sizes </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-tel">󰈟</span> <span class="diff-del">IMG_001.jpeg</span> <span class="c-yel">→</span> <span class="diff-add">photo_001.jpg</span></span><span class="c-sub">  2.4M</span></div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-tel">󰈟</span> <span class="diff-del">IMG_002.jpeg</span> <span class="c-yel">→</span> <span class="diff-add">photo_002.jpg</span></span><span class="c-sub">  3.1M</span></div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-tel">󰈟</span> <span class="diff-del">IMG_003.jpeg</span> <span class="c-yel">→</span> <span class="diff-add">photo_003.jpg</span></span><span class="c-sub">  1.9M</span></div>
+                <div class="tui-row new-callout"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-tel">󰈟</span> <span class="diff-del">IMG_004.jpeg</span> <span class="c-yel">→</span> <span class="diff-add">photo_004.jpg</span></span><span class="c-sub">  4.0M</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰈟</span> logo.svg</span><span class="c-dim">  12.4K</span></div>
+              </div>
+              <div class="new-callout" style="background:#191a22;padding:4px 8px;border-top:1px solid #353746">
+                <span class="c-dim">Tab completions: </span><span class="tab-active">:chmod</span> <span class="c-sub">:cd</span> <span class="c-sub">:ln</span> <span class="c-sub">:prefix</span> <span class="c-sub">:suffix</span> <span class="c-sub">:undo-apply</span>
+              </div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> IMG_001.jpeg  <span class="c-dim">2.4M  2d</span></div>
+              <div class="c-dim"> </div>
+              <div class="c-sub b"> Image Metadata (sips / file)</div>
+              <div class="c-dim">   Format:      <span class="c-txt">JPEG (EXIF 2.31)</span></div>
+              <div class="c-dim">   Dimensions:  <span class="c-tel">3840 × 2160 px (16:9)</span></div>
+              <div class="c-dim">   Color Space: <span class="c-txt">Display P3</span></div>
+              <div class="c-dim">   Camera:      <span class="c-txt">Fujifilm X-T5 · 35mm f/1.4</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="c-acc b">:</span><span class="c-txt">%s/IMG_(\d+)\.jpeg/photo_$1.jpg/g</span><span class="rev"> </span></span><span><span class="c-acc">⏎</span> <span class="c-dim">apply subst</span> <span class="c-acc">⇥</span> <span class="c-dim">complete</span> <span class="c-acc">esc</span> <span class="c-dim">cancel</span></span></div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/atlas/</span><span class="c-txt b">assets</span></span><span class="c-dim">name </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row sel"><span class="c-txt">   <span class="c-tel">󰈟</span> <span class="rev">I</span>MG_001.jpeg</span><span class="c-sub">  2.4M</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰈟</span> IMG_002.jpeg</span><span class="c-sub">  3.1M</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰈟</span> IMG_003.jpeg</span><span class="c-sub">  1.9M</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰈟</span> IMG_004.jpeg</span><span class="c-sub">  4.0M</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel">󰈟</span> logo.svg</span><span class="c-dim">  12.4K</span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> IMG_001.jpeg  <span class="c-dim">2.4M  2d</span></div>
+              <div class="c-sub b"> binary file</div>
+              <div class="c-dim"> 2.4M  ·  jpeg</div>
+              <div class="c-dim"> JPEG image data, Exif standard</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span> <span class="c-red">unknown command: %s/IMG_/photo_/g</span></span><span><span class="c-acc">⏎</span> <span class="c-dim">open</span> <span class="c-acc">:w</span> <span class="c-dim">apply</span></span></div>
+      </div>
+    `
+  },
+  {
+    title: "3. Confirm Modal: Character-Level Diffs & Transaction Rollback",
+    sub: "Highlight the exact characters added/removed in RENAME and MOVE operations inside the confirmation dialog, and allow rolling back the last applied transaction with U / :undo-apply.",
+    plateTitle: "Oil · Review & Apply Plan",
+    callouts: [
+      { tag: "Character-Level Diffs", text: "Instead of flat white strings (`very_long_module_v1.rs → very_long_module_v2.rs`), the exact mutated substring is highlighted in red/green." },
+      { tag: "Permission & Symlink Ops", text: "CHMOD and SYMLINK operations appear alongside CREATE, RENAME, MOVE, COPY, and DELETE in the unified execution plan." },
+      { tag: "Reversible Transactions (U)", text: "Because moves, creates, and Trash paths are deterministic, `herdr-oil` records the last applied `Report` so pressing `U` rolls it back." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/</span><span class="c-txt b">atlas</span><span class="c-yel b"> [+]</span></span><span class="c-dim">↑name </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-pch"></span> auth_provider_v2.rs</span><span class="c-dim">4.1K</span></div>
+                <div class="tui-row"><span class="c-txt"><span class="c-yel b">~</span>  <span class="c-pch"></span> session_store_v2.rs</span><span class="c-dim">8.3K</span></div>
+                <div class="tui-row"><span class="c-txt"><span class="c-grn b">+</span>  <span class="c-grn"></span> scripts/release.sh</span><span class="c-dim">new</span></div>
+              </div>
+            </div>
+            <div class="tui-prev"></div>
+          </div>
+        </div>
+        <div class="tui-modal-backdrop">
+          <div class="tui-modal">
+            <div class="tui-modal-title c-acc">Apply 5 changes?  in ~/Projects/atlas</div>
+            <div style="display:grid;gap:4px;margin:4px 0 12px">
+              <div> <span class="c-grn b">CREATE </span> <span class="c-txt">scripts/<span class="diff-add">release.sh</span></span> <span class="c-pch">[chmod +x]</span></div>
+              <div> <span class="c-yel b">RENAME </span> <span class="c-txt">src/auth_provider_<span class="diff-del">v1</span>.rs  →  src/auth_provider_<span class="diff-add">v2</span>.rs</span></div>
+              <div> <span class="c-yel b">RENAME </span> <span class="c-txt">src/session_store_<span class="diff-del">draft</span>.rs  →  src/session_store_<span class="diff-add">v2</span>.rs</span></div>
+              <div> <span class="c-tel b">SYMLINK</span> <span class="c-txt">current.toml  →  <span class="diff-del">config.dev.toml</span> <span class="diff-add">config.prod.toml</span></span></div>
+              <div> <span class="c-red b">DELETE </span> <span class="c-txt">old_notes.txt   <span class="c-dim">(to ~/.Trash · reversible via U)</span></span></div>
+            </div>
+            <div style="border-top:1px solid #3a3a48;padding-top:6px;display:flex;justify-content:space-between">
+              <span><span class="c-grn b">y/⏎</span> <span class="c-dim">apply</span>   <span class="c-red b">n/esc</span> <span class="c-dim">keep editing</span>   <span class="c-acc b">d</span> <span class="c-dim">toggle char-diff</span></span>
+              <span class="c-dim">staged · 0 overwrites</span>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span></span><span></span></div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/</span><span class="c-txt b">atlas</span><span class="c-yel b"> [+]</span></span><span class="c-dim">name </span></div>
+          <div class="tui-body">
+            <div class="tui-list"></div>
+            <div class="tui-prev"></div>
+          </div>
+        </div>
+        <div class="tui-modal-backdrop">
+          <div class="tui-modal danger">
+            <div class="tui-modal-title c-red">Apply 4 changes?  in ~/Projects/atlas</div>
+            <div style="display:grid;gap:4px;margin:4px 0 12px">
+              <div> <span class="c-grn b">CREATE </span> <span class="c-txt">scripts/release.sh</span></div>
+              <div> <span class="c-yel b">RENAME </span> <span class="c-txt">src/auth_provider_v1.rs  →  src/auth_provider_v2.rs</span></div>
+              <div> <span class="c-yel b">RENAME </span> <span class="c-txt">src/session_store_draft.rs  →  src/session_store_v2.rs</span></div>
+              <div> <span class="c-red b">DELETE </span> <span class="c-txt">old_notes.txt   (to Trash)</span></div>
+            </div>
+            <div style="border-top:1px solid #3a3a48;padding-top:6px">
+              <span class="c-grn b">y/⏎</span> <span class="c-dim">apply</span>   <span class="c-red b">n/esc</span> <span class="c-dim">keep editing</span>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span></span><span></span></div>
+      </div>
+    `
+  },
+  {
+    title: "4. Finder: 5th 'Git Status' Mode, Ripgrep Globs & Send-to-Agent (^i)",
+    sub: "Add a Git modified/untracked tab with live git-diff previews, support `query -- *.rs` file filtering in Grep mode, and send selected file paths (`@src/plan.rs:148`) directly to an AI agent or shell in the origin pane.",
+    plateTitle: "Find · ~/Projects/herdr-oil",
+    callouts: [
+      { tag: "5th Tab: Git Status (␣s)", text: "Lists modified, staged, and untracked files across the repository and renders `git diff` in the right preview pane." },
+      { tag: "Grep Glob/Type Filter", text: "In Grep mode, suffixing `-- *.rs` or `:: -t rust` filters ripgrep results by glob or file type without leaving the prompt." },
+      { tag: "Send to Origin / Agent (^i)", text: "When paired with an AI agent in `herdr`, pressing `^i` pastes `@src/plan.rs` (or all `● marked` paths) directly into the origin pane." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head">
+            <span>  <span class="c-sub">󰈔 Files</span>   <span class="c-sub">󰉋 Dirs</span>   <span class="c-sub">󰍉 Grep</span>   <span class="tab-active"> Git (6)</span>   <span class="c-sub">󰋚 Recent</span></span>
+            <span class="c-dim">6/6   ~/Projects/herdr-oil  </span>
+          </div>
+          <div class="tui-head" style="border-bottom:1px solid #6e6a86">
+            <span> <span class="c-acc b">󰍉</span> <span class="c-txt">plan</span><span class="rev"> </span> <span class="c-dim it">(filter modified files · 2 marked)</span>   <span class="c-pch">● 2 marked</span></span>
+            <span class="c-tel">filter: *.rs</span>
+          </div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row sel"><span class="c-txt"><span class="c-acc">▌</span><span class="c-pch">●</span> <span class="c-yel b">M</span> <span class="c-pch"></span> <span class="c-sub">src/</span><span class="hl-match">plan</span>.rs</span><span class="c-grn">+42 <span class="c-red">−8</span></span></div>
+                <div class="tui-row"><span class="c-txt"> <span class="c-pch">●</span> <span class="c-yel b">M</span> <span class="c-pch"></span> <span class="c-sub">src/</span>apply.rs</span><span class="c-grn">+19 <span class="c-red">−3</span></span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-grn b">A</span> <span class="c-pch"></span> <span class="c-sub">src/</span>undo_<span class="hl-match">plan</span>.rs</span><span class="c-grn">+84 <span class="c-dim">−0</span></span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-tel b">?</span> <span class="c-txt">󰍔</span> feature_updates.md</span><span class="c-dim">untracked</span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> git diff -- src/plan.rs  <span class="c-grn">+42</span> <span class="c-red">−8</span></div>
+              <div class="c-tel"> @@ -16,6 +16,8 @@ pub enum Op {</div>
+              <div class="c-dim">      Create { dst: PathBuf, dir: bool },</div>
+              <div class="c-dim">      Move { src: PathBuf, dst: PathBuf, dir: bool },</div>
+              <div class="c-grn"> +    Symlink { dst: PathBuf, target: PathBuf },</div>
+              <div class="c-grn"> +    Chmod { path: PathBuf, mode: u32 },</div>
+              <div class="c-dim">      Delete { src: PathBuf, dir: bool },</div>
+              <div class="c-dim">  }</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status">
+          <span><span class="pill-find"> FIND </span> <span class="c-grn">sent 2 paths (@src/plan.rs @src/apply.rs) to origin pane w1:p1</span></span>
+          <span><span class="c-acc">⏎</span> <span class="c-dim">open</span> <span class="c-acc">^i</span> <span class="c-dim">send to pane</span> <span class="c-acc">^v</span> <span class="c-dim">split</span> <span class="c-acc">⇥</span> <span class="c-dim">mode</span></span>
+        </div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head">
+            <span>  <span class="tab-active">󰈔 Files</span>   <span class="c-sub">󰉋 Dirs</span>   <span class="c-sub">󰍉 Grep</span>   <span class="c-sub">󰋚 Recent</span></span>
+            <span class="c-dim">1/14   ~/Projects/herdr-oil  </span>
+          </div>
+          <div class="tui-head" style="border-bottom:1px solid #6e6a86">
+            <span> <span class="c-acc b">󰍉</span> <span class="c-txt">plan</span><span class="rev"> </span>   <span class="c-pch">● 2 marked</span></span>
+            <span></span>
+          </div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row sel"><span class="c-txt"><span class="c-acc">▌</span><span class="c-pch">●</span> <span class="c-pch"></span> <span class="c-sub">src/</span><span class="hl-match">plan</span>.rs</span><span></span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> plan.rs  <span class="c-dim">12.4K  1h</span></div>
+              <div class="c-dim">   1 //! Turn edited buffers into filesystem operations</div>
+              <div class="c-dim">   2 </div>
+              <div class="c-dim">   3 use crate::buffer::Buffer;</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status">
+          <span><span class="pill-find"> FIND </span></span>
+          <span><span class="c-acc">⏎</span> <span class="c-dim">open</span> <span class="c-acc">^v</span> <span class="c-dim">split</span> <span class="c-acc">^t</span> <span class="c-dim">tab</span> <span class="c-acc">^o</span> <span class="c-dim">reveal</span> <span class="c-acc">⇥</span> <span class="c-dim">mode</span></span>
+        </div>
+      </div>
+    `
+  },
+  {
+    title: "5. Rich Previews: Directories with README/Stats & Archive/SQLite Inspection",
+    sub: "Enhance directory previews with total size, git summary, and README.md excerpt; inspect .zip/.tar.gz archives and .sqlite schemas instead of showing 'binary file'.",
+    plateTitle: "Oil · ~/Projects/herdr-oil/releases",
+    callouts: [
+      { tag: "Archive & Binary Inspectors", text: "Selecting `.tar.gz`, `.zip`, `.whl`, or `.sqlite` runs `tar -ztvf`, `unzip -l`, or `sqlite3 .schema` so you can peek inside without extracting." },
+      { tag: "Directory Summary + README", text: "Directory previews show item counts, git status badges, and automatically render the top of `README.md` if present." },
+      { tag: "Async 1k-Capped Child Counts", text: "Directory item counts cap at `1k+` on a background thread so entering a parent of `node_modules/` or `target/` never blocks the UI." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/herdr-oil/</span><span class="c-txt b">releases</span></span><span class="c-dim">↓size · details </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-acc">󰉋</span> <span class="c-acc b">docs/</span></span><span class="c-dim">drwxr-xr-x    5 items    1h</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-grn"></span> <span class="c-acc b">node_modules/</span></span><span class="c-dim">drwxr-xr-x  <span class="c-tel">1k+ items</span>    3d</span></div>
+                <div class="tui-row sel"><span class="c-txt">   <span class="c-pch">󰆧</span> <span class="rev">h</span>erdr-oil-v0.1.0-macos.tar.gz</span><span class="c-sub">-rw-r--r--       1.8M   10m</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-blu">󰆼</span> state_cache.sqlite</span><span class="c-dim">-rw-r--r--       128K    2h</span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> herdr-oil-v0.1.0-macos.tar.gz  <span class="c-dim">1.8M · tar.gz archive (5 entries)</span></div>
+              <div class="c-dim"> ────────────────────────────────────────────────────────</div>
+              <div class="c-dim"> -rwxr-xr-x  <span class="c-sub">  4.1M</span>  <span class="c-grn">herdr-oil/target/release/herdr-oil</span></div>
+              <div class="c-dim"> -rw-r--r--  <span class="c-dim">  1.9K</span>  <span class="c-txt">herdr-oil/herdr-plugin.toml</span></div>
+              <div class="c-dim"> -rw-r--r--  <span class="c-dim">  812B</span>  <span class="c-txt">herdr-oil/config.example.toml</span></div>
+              <div class="c-dim"> -rw-r--r--  <span class="c-dim">  5.4K</span>  <span class="c-yel">herdr-oil/README.md</span></div>
+              <div class="c-dim"> -rw-r--r--  <span class="c-dim">  1.1K</span>  <span class="c-txt">herdr-oil/LICENSE</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span></span><span><span class="c-acc">gs/gS</span> <span class="c-dim">sort/reverse</span> <span class="c-acc">gy/gY/gn</span> <span class="c-dim">yank rel/abs/name</span></span></div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head"><span> <span class="c-acc"></span> <span class="c-sub">~/Projects/herdr-oil/</span><span class="c-txt b">releases</span></span><span class="c-dim">size · details </span></div>
+          <div class="tui-body">
+            <div class="tui-list">
+              <div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-acc">󰉋</span> <span class="c-acc b">docs/</span></span><span class="c-dim">drwxr-xr-x    5 items    1h</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-grn"></span> <span class="c-acc b">node_modules/</span></span><span class="c-dim">drwxr-xr-x  64812 items  3d</span></div>
+                <div class="tui-row sel"><span class="c-txt">   <span class="c-pch">󰆧</span> <span class="rev">h</span>erdr-oil-v0.1.0-macos.tar.gz</span><span class="c-sub">-rw-r--r--       1.8M   10m</span></div>
+                <div class="tui-row"><span class="c-txt">   <span class="c-txt">󰈔</span> state_cache.sqlite</span><span class="c-dim">-rw-r--r--       128K    2h</span></div>
+              </div>
+              <div></div>
+            </div>
+            <div class="tui-prev">
+              <div class="c-txt b"> herdr-oil-v0.1.0-macos.tar.gz  <span class="c-dim">1.8M  10m</span></div>
+              <div class="c-sub b"> binary file</div>
+              <div class="c-dim"> 1.8M  ·  gz</div>
+              <div class="c-dim"></div>
+              <div class="c-dim"> gzip compressed data, from Unix</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status"><span><span class="pill-oil"> OIL </span></span><span><span class="c-acc">⏎</span> <span class="c-dim">open</span> <span class="c-acc">gs</span> <span class="c-dim">sort</span></span></div>
+      </div>
+    `
+  },
+  {
+    title: "6. Built-In Viewer: In-File /Search + Match Jumping (n/N)",
+    sub: "Since Enter opens the built-in syntax-highlighted viewer by default (open = 'view'), add /search with match counter and n/N navigation inside the viewer.",
+    plateTitle: "View · ~/Projects/herdr-oil/src/apply.rs",
+    callouts: [
+      { tag: "In-Viewer /Search & n/N", text: "Pressing `/` inside the read-only viewer highlights all matches across the file and jumps between hits with `n` / `N`." },
+      { tag: "Edit at Current Scroll Line (e)", text: "Pressing `e` or `^v` from the viewer passes `+top_line` to `$EDITOR` so your editor opens at the exact section you were reading." },
+      { tag: "Granular Path Yank (y / Y)", text: "Press `y` to copy `src/apply.rs:142` (relative path + line) or `Y` for the full absolute path." }
+    ],
+    after: `
+      <div class="tui">
+        <div>
+          <div class="tui-head">
+            <span> <span class="c-pch"></span> <span class="c-sub">~/Projects/herdr-oil/src/</span><span class="c-txt b">apply.rs</span>  <span class="c-dim">14.1K  1h</span>  <span class="c-yel b">[match 2/5: "stage"]</span></span>
+            <span class="c-dim">138–149 of 404 </span>
+          </div>
+          <div class="tui-body full">
+            <div class="tui-prev" style="padding-left:6px">
+              <div class="c-dim"> 138     best</div>
+              <div class="c-dim"> 139 }</div>
+              <div class="c-dim"> 140 </div>
+              <div class="c-dim" style="background:#313244"> 141 <span class="c-red">fn</span> <span class="c-acc"><span class="hl-match">stage</span>_path</span>(&amp;<span class="c-red">mut</span> <span class="c-pch">self</span>, src: &amp;<span class="c-yel">Path</span>) -&gt; <span class="c-yel">PathBuf</span> {</div>
+              <div class="c-dim"> 142     <span class="c-red">let</span> dir = <span class="c-pch">self</span>.stable_dir(src);</div>
+              <div class="c-dim"> 143     <span class="c-red">loop</span> {</div>
+              <div class="c-dim"> 144         <span class="c-pch">self</span>.n += <span class="c-blu">1</span>;</div>
+              <div class="c-dim"> 145         <span class="c-red">let</span> p = dir.join(<span class="c-acc">format!</span>(<span class="c-grn">".herdr-oil~{}-{}"</span>, std::process::id(), <span class="c-pch">self</span>.n));</div>
+              <div class="c-dim"> 146         <span class="c-red">if</span> fs::symlink_metadata(&amp;p).is_err() {</div>
+              <div class="c-dim"> 147             <span class="c-red">return</span> p;</div>
+              <div class="c-dim"> 148         }</div>
+              <div class="c-dim"> 149     }</div>
+              <div class="c-dim"> 150 }</div>
+              <div class="c-dim"> 151 <span class="c-dim">// Landing::Staged(<span class="hl-match">stage</span>) moves into final_dst</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status">
+          <span><span class="pill-view"> VIEW </span> <span class="c-acc">/stage</span> <span class="c-dim">(2/5)</span></span>
+          <span><span class="c-acc">/</span> <span class="c-dim">search</span> <span class="c-acc">n/N</span> <span class="c-dim">next/prev</span> <span class="c-acc">e</span> <span class="c-dim">edit :141</span> <span class="c-acc">y/Y</span> <span class="c-dim">copy rel/abs</span> <span class="c-acc">q</span> <span class="c-dim">back</span></span>
+        </div>
+      </div>
+    `,
+    before: `
+      <div class="tui">
+        <div>
+          <div class="tui-head">
+            <span> <span class="c-pch"></span> <span class="c-sub">~/Projects/herdr-oil/src/</span><span class="c-txt b">apply.rs</span>  <span class="c-dim">14.1K  1h</span></span>
+            <span class="c-dim">138–149 of 404 </span>
+          </div>
+          <div class="tui-body full">
+            <div class="tui-prev" style="padding-left:6px">
+              <div class="c-dim"> 138     best</div>
+              <div class="c-dim"> 139 }</div>
+              <div class="c-dim"> 140 </div>
+              <div class="c-dim"> 141 <span class="c-red">fn</span> <span class="c-acc">stage_path</span>(&amp;<span class="c-red">mut</span> <span class="c-pch">self</span>, src: &amp;<span class="c-yel">Path</span>) -&gt; <span class="c-yel">PathBuf</span> {</div>
+              <div class="c-dim"> 142     <span class="c-red">let</span> dir = <span class="c-pch">self</span>.stable_dir(src);</div>
+              <div class="c-dim"> 143     <span class="c-red">loop</span> {</div>
+              <div class="c-dim"> 144         <span class="c-pch">self</span>.n += <span class="c-blu">1</span>;</div>
+              <div class="c-dim"> 145         <span class="c-red">let</span> p = dir.join(<span class="c-acc">format!</span>(<span class="c-grn">".herdr-oil~{}-{}"</span>, std::process::id(), <span class="c-pch">self</span>.n));</div>
+              <div class="c-dim"> 146         <span class="c-red">if</span> fs::symlink_metadata(&amp;p).is_err() {</div>
+              <div class="c-dim"> 147             <span class="c-red">return</span> p;</div>
+              <div class="c-dim"> 148         }</div>
+              <div class="c-dim"> 149     }</div>
+              <div class="c-dim"> 150 }</div>
+            </div>
+          </div>
+        </div>
+        <div class="tui-status">
+          <span><span class="pill-view"> VIEW </span></span>
+          <span><span class="c-acc">j/k ␣ b</span> <span class="c-dim">scroll</span> <span class="c-acc">e</span> <span class="c-dim">edit here</span> <span class="c-acc">^v</span> <span class="c-dim">split</span> <span class="c-acc">^t</span> <span class="c-dim">tab</span> <span class="c-acc">y</span> <span class="c-dim">copy path</span> <span class="c-acc">q</span> <span class="c-dim">back</span></span>
+        </div>
+      </div>
+    `
+  }
+];
+
+let curScreen = 0;
+let curMode = "after";
+
+function renderMockup() {
+  const s = SCREENS[curScreen];
+  document.getElementById("mock-title").textContent = s.title;
+  document.getElementById("mock-sub").textContent = s.sub;
+  document.getElementById("plate-title").textContent = s.plateTitle;
+  const badge = document.getElementById("plate-badge");
+  if (curMode === "after") {
+    badge.textContent = "PROPOSED (v0.2)";
+    badge.className = "badge";
+  } else {
+    badge.textContent = "CURRENT (v0.1.0)";
+    badge.className = "badge before";
+  }
+  document.getElementById("tui-viewport").innerHTML = curMode === "after" ? s.after : s.before;
+  document.getElementById("mock-callouts").innerHTML = s.callouts.map(c => `
+    <div class="callout">
+      <span class="tag">${c.tag}</span>
+      <p>${c.text}</p>
+    </div>
+  `).join("");
+}
+
+document.querySelectorAll("#screen-tabs .tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#screen-tabs .tab-btn").forEach(b => b.setAttribute("aria-selected", "false"));
+    btn.setAttribute("aria-selected", "true");
+    curScreen = Number(btn.dataset.screen);
+    renderMockup();
+  });
+});
+
+document.querySelectorAll(".compare-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".compare-toggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    curMode = btn.dataset.mode;
+    renderMockup();
+  });
+});
+
+window.addEventListener("keydown", e => {
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) return;
+  if (e.key >= "1" && e.key <= "6") {
+    const idx = Number(e.key) - 1;
+    const btn = document.querySelector(`#screen-tabs .tab-btn[data-screen="${idx}"]`);
+    if (btn) btn.click();
+  } else if (e.key === " ") {
+    e.preventDefault();
+    curMode = curMode === "after" ? "before" : "after";
+    document.querySelectorAll(".compare-toggle button").forEach(b => {
+      b.classList.toggle("active", b.dataset.mode === curMode);
+    });
+    renderMockup();
+  }
+});
+
+// Theme toggle
+document.getElementById("theme-btn").addEventListener("click", () => {
+  const root = document.documentElement;
+  root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+});
+
+// ── SANDBOX ────────────────────────────────────────────────────────────────
+const INITIAL_BUFFER = [
+  { id: 1, orig: "report-draft.md", text: "report-draft.md", exec: false },
+  { id: 2, orig: "spec-draft.md", text: "spec-draft.md", exec: false },
+  { id: 3, orig: "photo_1.jpeg", text: "photo_1.jpeg", exec: false },
+  { id: 4, orig: "deploy.sh", text: "deploy.sh", exec: false },
+  { id: 5, orig: "current.toml -> config.dev.toml", text: "current.toml -> config.dev.toml", exec: false }
+];
+
+let sbState = JSON.parse(JSON.stringify(INITIAL_BUFFER));
+let sbHistory = [];
+
+function charDiffHtml(oldStr, newStr) {
+  if (oldStr === newStr) return oldStr;
+  let pre = 0;
+  while (pre < oldStr.length && pre < newStr.length && oldStr[pre] === newStr[pre]) pre++;
+  let suf = 0;
+  while (
+    suf < (oldStr.length - pre) &&
+    suf < (newStr.length - pre) &&
+    oldStr[oldStr.length - 1 - suf] === newStr[newStr.length - 1 - suf]
+  ) suf++;
+  const prefix = oldStr.slice(0, pre);
+  const suffix = oldStr.slice(oldStr.length - suf);
+  const delMid = oldStr.slice(pre, oldStr.length - suf);
+  const addMid = newStr.slice(pre, newStr.length - suf);
+  return `${prefix}${delMid ? `<span class="diff-del">${delMid}</span>` : ""}  →  ${prefix}${addMid ? `<span class="diff-add">${addMid}</span>` : ""}${suffix}`;
+}
+
+function renderSandbox() {
+  const rowsEl = document.getElementById("sb-rows");
+  rowsEl.innerHTML = "";
+  const presentIds = new Set(sbState.map(r => r.id).filter(Boolean));
+  const deleted = INITIAL_BUFFER.filter(r => !presentIds.has(r.id));
+
+  sbState.forEach((row, idx) => {
+    const isModified = row.orig && row.text !== row.orig;
+    const isNew = !row.orig;
+    const badge = isNew ? `<span class="c-grn b">+</span>` : (isModified || row.exec) ? `<span class="c-yel b">~</span>` : `&nbsp;`;
+    const origHint = isModified ? `<span class="c-dim it" style="font-size:.8rem;white-space:nowrap">← ${row.orig}</span>` : "";
+    const execHint = row.exec ? `<span class="c-pch" style="font-size:.78rem">[+x]</span>` : "";
+
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "display:grid;grid-template-columns:18px 1fr auto auto;gap:8px;align-items:center;background:var(--sunk);padding:5px 8px;border-radius:6px;border:1px solid var(--line)";
+    wrap.innerHTML = `
+      <span style="text-align:center">${badge}</span>
+      <input type="text" value="${row.text.replace(/"/g, '&quot;')}" data-idx="${idx}" style="background:transparent;border:none;color:var(--fg);font:500 .88rem/1 var(--mono);width:100%;outline:none">
+      ${execHint}
+      ${origHint}
+      <button type="button" class="btn" data-dd="${idx}" style="padding:4px 7px;font-size:.72rem">dd</button>
+    `;
+    rowsEl.appendChild(wrap);
+  });
+
+  rowsEl.querySelectorAll("input[data-idx]").forEach(inp => {
+    inp.addEventListener("input", e => {
+      const i = Number(inp.dataset.idx);
+      sbState[i].text = inp.value;
+      updateSandboxPlan();
+    });
+    inp.addEventListener("change", () => renderSandbox());
+  });
+
+  rowsEl.querySelectorAll("button[data-dd]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      sbHistory.push(JSON.parse(JSON.stringify(sbState)));
+      sbState.splice(Number(btn.dataset.dd), 1);
+      renderSandbox();
+    });
+  });
+
+  const delFoot = document.getElementById("sb-deleted-footer");
+  if (deleted.length > 0) {
+    delFoot.style.display = "block";
+    delFoot.innerHTML = `── ${deleted.length} pending delete(s) in this dir: <b>${deleted.map(d => d.orig).join("</b>, <b>")}</b>`;
+  } else {
+    delFoot.style.display = "none";
+  }
+
+  updateSandboxPlan();
+}
+
+function updateSandboxPlan() {
+  const ops = [];
+  const presentIds = new Set(sbState.map(r => r.id).filter(Boolean));
+
+  sbState.forEach(r => {
+    const t = r.text.trim();
+    if (!t) return;
+    if (!r.orig) {
+      if (t.includes("->")) {
+        const [lhs, rhs] = t.split("->").map(s => s.trim());
+        ops.push(`<div><span class="c-tel b">SYMLINK</span> <span class="c-txt">${lhs} → <span class="diff-add">${rhs}</span></span></div>`);
+      } else {
+        ops.push(`<div><span class="c-grn b">CREATE </span> <span class="c-txt"><span class="diff-add">${t}</span></span></div>`);
+      }
+    } else if (t !== r.orig) {
+      if (t.includes("->") && r.orig.includes("->")) {
+        ops.push(`<div><span class="c-tel b">SYMLINK</span> <span class="c-txt">${charDiffHtml(r.orig, t)}</span></div>`);
+      } else {
+        ops.push(`<div><span class="c-yel b">RENAME </span> <span class="c-txt">${charDiffHtml(r.orig, t)}</span></div>`);
+      }
+    }
+    if (r.exec) {
+      ops.push(`<div><span class="c-pch b">CHMOD  </span> <span class="c-txt">+x (0755) ${t}</span></div>`);
+    }
+  });
+
+  INITIAL_BUFFER.forEach(orig => {
+    if (!presentIds.has(orig.id)) {
+      ops.push(`<div><span class="c-red b">DELETE </span> <span class="c-txt">${orig.orig} <span class="c-dim">(to Trash)</span></span></div>`);
+    }
+  });
+
+  document.getElementById("sb-count").textContent = `${ops.length} operation${ops.length === 1 ? "" : "s"}`;
+  document.getElementById("sb-plan").innerHTML = ops.length
+    ? ops.join("")
+    : `<span class="c-dim it">No pending changes — run an Ex command or edit a line on the left.</span>`;
+}
+
+function runSandboxEx(cmdStr) {
+  const cmd = cmdStr.trim().replace(/^:/, "");
+  sbHistory.push(JSON.parse(JSON.stringify(sbState)));
+
+  if (cmd.startsWith("%s/") || cmd.startsWith("s/")) {
+    const parts = cmd.replace(/^%?s\//, "").split("/");
+    const pat = parts[0] || "";
+    const rep = parts[1] ?? "";
+    const flags = parts[2] || "";
+    try {
+      const rx = new RegExp(pat, flags.includes("g") ? "g" : "");
+      sbState.forEach(r => {
+        if (!r.text.includes("->")) {
+          r.text = r.text.replace(rx, rep);
+        }
+      });
+    } catch (_) {}
+  } else if (cmd.startsWith("prefix ")) {
+    const p = cmd.slice(7);
+    sbState.forEach(r => { r.text = p + r.text; });
+  } else if (cmd.startsWith("chmod +x")) {
+    const target = cmd.replace("chmod +x", "").trim();
+    sbState.forEach(r => {
+      if (!target || r.text === target) r.exec = true;
+    });
+  } else if (cmd.startsWith("ln ")) {
+    const rest = cmd.slice(3).trim().split(/\s+/);
+    if (rest.length === 2) {
+      sbState.push({ id: null, orig: null, text: `${rest[1]} -> ${rest[0]}`, exec: false });
+    }
+  }
+  renderSandbox();
+}
+
+document.getElementById("sb-run").addEventListener("click", () => {
+  runSandboxEx(document.getElementById("sb-cmd").value);
+});
+document.getElementById("sb-cmd").addEventListener("keydown", e => {
+  if (e.key === "Enter") runSandboxEx(e.target.value);
+});
+document.querySelectorAll(".chip[data-cmd]").forEach(chip => {
+  chip.addEventListener("click", () => {
+    document.getElementById("sb-cmd").value = chip.dataset.cmd;
+    runSandboxEx(chip.dataset.cmd);
+  });
+});
+document.getElementById("sb-undo").addEventListener("click", () => {
+  if (sbHistory.length > 0) {
+    sbState = sbHistory.pop();
+    renderSandbox();
+  }
+});
+document.getElementById("sb-reset").addEventListener("click", () => {
+  sbHistory = [];
+  sbState = JSON.parse(JSON.stringify(INITIAL_BUFFER));
+  renderSandbox();
+});
+
+// ── ROADMAP MATRIX ─────────────────────────────────────────────────────────
+const FEATURES = [
+  { cat: "func", catLabel: "Functionality", title: "`:s` and `:%s/pat/rep/g` Substitution", effort: "Small", files: "src/vim.rs", desc: "Regex/substring search-and-replace across the current line, visual selection, or entire directory buffer." },
+  { cat: "func", catLabel: "Functionality", title: "Dot Repeat (`.`) & Reverse Find (`,`)", effort: "Small", files: "src/vim.rs", desc: "Repeat the last normal-mode edit (`cin`, `cw`, `x`, `~`) on the next file with `.`, and reverse `f`/`t` motions with `,`." },
+  { cat: "func", catLabel: "Functionality", title: "Editable Symlinks (`name -> target`)", effort: "Medium", files: "src/entry.rs · src/plan.rs · src/apply.rs", desc: "Include symlink targets in buffer text or support `:ln src dst` so links can be created and retargeted." },
+  { cat: "func", catLabel: "Functionality", title: "Executable Bit & `:chmod`", effort: "Small", files: "src/vim.rs · src/plan.rs · src/apply.rs", desc: "Stage permission changes (`:chmod +x` or `:chmod 755`) right after creating scripts with `o`." },
+  { cat: "func", catLabel: "Functionality", title: "Post-Apply Transaction Undo (`U`)", effort: "Medium", files: "src/apply.rs · src/app.rs", desc: "Store the last applied `Report` (including Trash paths) so `:undo-apply` / `U` reverses the last disk batch." },
+  { cat: "func", catLabel: "Functionality", title: "5th Finder Mode: `Git Status` (`␣s`)", effort: "Medium", files: "src/finder.rs · src/ui.rs", desc: "Fuzzy-filter modified/untracked repo files and preview `git diff` in the right pane." },
+  { cat: "func", catLabel: "Functionality", title: "Ripgrep File Glob/Type Filter in Grep", effort: "Small", files: "src/finder.rs", desc: "Allow `needle -- *.rs` or `needle :: -t ts` in Grep mode to pass `-g` / `-t` flags to `rg`." },
+  { cat: "func", catLabel: "Functionality", title: "Send Path(s) to Origin / Agent Pane (`^i` / `gp`)", effort: "Small", files: "src/open.rs · src/app.rs", desc: "Send selected/marked file paths (`@src/app.rs:42`) directly into an AI agent or shell in the origin herdr pane." },
+  { cat: "func", catLabel: "Functionality", title: "Edit Listing in External `$EDITOR` (`ge`)", effort: "Medium", files: "src/app.rs · src/buffer.rs", desc: "Suspend popup and open buffer lines in `$EDITOR` (with `/001` ID prefixes) for multi-cursor/macro refactoring." },
+  { cat: "func", catLabel: "Functionality", title: "Visual Prefix / Suffix (`:prefix` / `:suffix`)", effort: "Small", files: "src/vim.rs", desc: "Quickly prepend or append text to all selected lines in Visual Line mode." },
+  { cat: "vis", catLabel: "Visualization", title: "Inline Original Filename (`← old.md`)", effort: "Small", files: "src/ui.rs", desc: "Render the original entry name dimmed after a modified line so you always see what is being renamed." },
+  { cat: "vis", catLabel: "Visualization", title: "Pending Deletions Footer in Buffer", effort: "Small", files: "src/ui.rs", desc: "Show a dimmed summary line at the bottom of the directory listing naming entries cut/deleted from the current folder." },
+  { cat: "vis", catLabel: "Visualization", title: "Character-Level Diffs in Confirm Dialog", effort: "Small", files: "src/ui.rs", desc: "Highlight the exact added/removed character spans inside `RENAME` and `MOVE` confirmation lines." },
+  { cat: "vis", catLabel: "Visualization", title: "Archive, Image & SQLite Previews", effort: "Medium", files: "src/preview.rs", desc: "Preview `.tar.gz`/`.zip` file trees, SQLite `.schema`, and directory `README.md` snippets instead of `binary file`." },
+  { cat: "vis", catLabel: "Visualization", title: "Unicode / CJK Display-Width Alignment", effort: "Small", files: "src/ui.rs · src/buffer.rs", desc: "Use `UnicodeWidthChar` instead of `.chars().count()` for cursor positioning and horizontal scrolling on wide glyphs." },
+  { cat: "ux", catLabel: "Ease of Use & Perf", title: "Directory History (`H`/`L`) & Bookmarks (`m{a-z}`)", effort: "Small", files: "src/app.rs · src/vim.rs", desc: "Navigate back/forward through visited folders with `H`/`L` and persist single-letter directory marks." },
+  { cat: "ux", catLabel: "Ease of Use & Perf", title: "Tab Completion in `:` Command Mode", effort: "Small", files: "src/vim.rs · src/app.rs", desc: "Complete directory/file paths for `:cd` / `:e` and ex command names on `<Tab>`." },
+  { cat: "ux", catLabel: "Ease of Use & Perf", title: "In-Viewer `/` Search & `gy`/`gY`/`gn` Yank", effort: "Small", files: "src/app.rs · src/ui.rs", desc: "Search inside the read-only file viewer with `/` + `n`/`N`, and yank relative path (`gy`), absolute path (`gY`), or name (`gn`)." },
+  { cat: "ux", catLabel: "Ease of Use & Perf", title: "Capped/Async Directory Child Counts & Reverse Sort (`gS`)", effort: "Small", files: "src/entry.rs", desc: "Cap `read_dir` child counts at 1,000 (`1k+ items`) or run off-thread so huge folders (`node_modules`) never lag; add `gS` reverse sort." }
+];
+
+function renderMatrix(filter = "all") {
+  const el = document.getElementById("feature-matrix");
+  const list = filter === "all" ? FEATURES : FEATURES.filter(f => f.cat === filter);
+  el.innerHTML = list.map(f => `
+    <div class="fcard">
+      <div class="fcard-top">
+        <span class="pill ${f.cat}">${f.catLabel}</span>
+        <span class="effort">Effort: ${f.effort}</span>
+      </div>
+      <h3>${f.title}</h3>
+      <p>${f.desc}</p>
+      <div class="files-ref">${f.files}</div>
+    </div>
+  `).join("");
+}
+
+document.querySelectorAll("#filter-btns button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#filter-btns button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    renderMatrix(btn.dataset.filter);
+  });
+});
+
+renderMockup();
+renderSandbox();
+renderMatrix();
+</script>
+</body>
+</html>
