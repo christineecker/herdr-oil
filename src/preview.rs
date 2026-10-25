@@ -36,7 +36,9 @@ pub struct Key {
     pub hidden: bool,
 }
 
-type Rendered = (Key, Vec<Line<'static>>, usize);
+/// Key, lines, focus, and whether the lines are a git diff (headed by
+/// [`crate::diff::file_header`]).
+type Rendered = (Key, Vec<Line<'static>>, usize, bool);
 
 /// Previews are rendered on a worker thread (bat, git, tar, unzip can take
 /// tens of milliseconds): the draw asks for a key and keeps showing what it
@@ -47,6 +49,8 @@ pub struct Cache {
     pub lines: Vec<Line<'static>>,
     /// Index into `lines` to scroll to (grep hit).
     pub focus: usize,
+    /// `lines` is a git diff whose first line is the file header.
+    pub diffed: bool,
     /// Requested, not rendered yet.
     pub pending: Option<Key>,
     tx: Option<std::sync::mpsc::Sender<(Key, Theme)>>,
@@ -89,8 +93,8 @@ impl Cache {
                         job = newer;
                     }
                     let (key, th) = job;
-                    let (lines, focus) = render_key(&key, &th);
-                    if done.send((key, lines, focus)).is_err() {
+                    let (lines, focus, diffed) = render_key(&key, &th);
+                    if done.send((key, lines, focus, diffed)).is_err() {
                         break;
                     }
                 }
@@ -113,8 +117,8 @@ impl Cache {
             if sent {
                 self.pending = Some(key);
             } else {
-                let (lines, focus) = render_key(&key, th);
-                (self.lines, self.focus, self.key) = (lines, focus, Some(key));
+                let (lines, focus, diffed) = render_key(&key, th);
+                (self.lines, self.focus, self.diffed, self.key) = (lines, focus, diffed, Some(key));
             }
         }
         self
@@ -124,11 +128,11 @@ impl Cache {
     pub fn poll(&mut self) -> bool {
         let Some(rx) = &self.rx else { return false };
         let mut changed = false;
-        while let Ok((key, lines, focus)) = rx.try_recv() {
+        while let Ok((key, lines, focus, diffed)) = rx.try_recv() {
             if self.pending.as_ref() == Some(&key) {
                 self.pending = None;
             }
-            (self.lines, self.focus, self.key) = (lines, focus, Some(key));
+            (self.lines, self.focus, self.diffed, self.key) = (lines, focus, diffed, Some(key));
             changed = true;
         }
         changed
@@ -150,18 +154,19 @@ impl Cache {
     pub fn get_now(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, show: Show) -> &Cache {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
         let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden };
-        let (lines, focus) = render_key(&key, th);
-        (self.lines, self.focus, self.key, self.pending) = (lines, focus, Some(key), None);
+        let (lines, focus, diffed) = render_key(&key, th);
+        (self.lines, self.focus, self.diffed, self.key, self.pending) = (lines, focus, diffed, Some(key), None);
         self
     }
 }
 
-fn render_key(k: &Key, th: &Theme) -> (Vec<Line<'static>>, usize) {
+fn render_key(k: &Key, th: &Theme) -> (Vec<Line<'static>>, usize, bool) {
+    let plain = |(v, focus)| (v, focus, false);
     match k.show {
-        Show::Diff => git_diff(&k.path, th, k.width, k.max).map(|v| (v, 0)).unwrap_or_else(|| render(&k.path, k.line, k.width, th, k.hidden, k.max)),
-        Show::Log => (git_log(&k.path, th, k.max), 0),
-        Show::Project => (project(&k.path, th, k.hidden, k.max, k.width), 0),
-        Show::File => render(&k.path, k.line, k.width, th, k.hidden, k.max),
+        Show::Diff => git_diff(&k.path, th, k.width, k.max).map(|v| (v, 0, true)).unwrap_or_else(|| plain(render(&k.path, k.line, k.width, th, k.hidden, k.max))),
+        Show::Log => (git_log(&k.path, th, k.max), 0, false),
+        Show::Project => (project(&k.path, th, k.hidden, k.max, k.width), 0, false),
+        Show::File => plain(render(&k.path, k.line, k.width, th, k.hidden, k.max)),
     }
 }
 

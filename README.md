@@ -36,12 +36,17 @@ Dash rows (pending edits, changes, marked and recent files). A first character
 picks another source and stays in front of the query as its sigil: `/` grep,
 `@` projects, `+` git changes, `<` recent (`/fn main` greps for `fn main`).
 None of these start an fzf term, so `'exact`, `^prefix` and `!not` still work.
-The header is that one line: sigil, query (or a noun saying what to type),
-and on the right the count (`N of M` while filtering), root and non-default
-flags; the Git tab shows the branch there. Pause two seconds on an empty
-prompt and it lists the sigils. The footer names at most two keys for the
-selected row (`⏎ focus workspace · ^t tab`, `⏎ diff · ^a unstage`,
-`^s send 3`) plus `? keys`. `⌫` on an empty query goes back to All; `␣`
+A row above it lists the sources (the current one in its colour), the
+count (`N of M` while filtering, `N to triage`, `N hits`), root and
+non-default flags. The prompt is the sigil, the query (empty: a noun saying
+what to type) and the branch on the right. Pause two seconds on an empty
+prompt and it lists the sigils too. The list and the preview each get a
+one-line heading: what is listed and how many; the file's git letter, name,
+size and age, with `+N −M` for a change.
+The footer is a `FIND` badge, the position (`3 of 40 · 2 marked`) and at
+most two keys for the selected row (`⏎ focus workspace · ^t tab`,
+`⏎ diff · ^a unstage`, `^s send 3`) plus `esc back` and `? keys`. A pane
+under 12 rows keeps just the prompt and the list. `⌫` on an empty query goes back to All; `␣`
 there opens a menu of every source (`a f d g r s p h`, the same letters as
 the explorer's `␣` keys) and `?` one sheet with the sources, every key for
 the current source, the view keys and the query syntax; `⇥` jumps to the next group: the next file in grep, the next section in Dash,

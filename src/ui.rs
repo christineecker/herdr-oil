@@ -608,12 +608,26 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect, path: Option<&Path>, l
         t.push(Span::styled(format!("  :{l}"), Style::default().fg(th.teal)));
     }
     f.render_widget(Paragraph::new(Line::from(t)), title);
+    draw_preview_body(f, app, body, Some(path), line, show, false);
+}
+
+/// The preview's text without the name row (the finder heads it itself).
+/// With `lift` a git diff's file header is left out and returned instead.
+fn draw_preview_body(f: &mut Frame, app: &mut App, body: Rect, path: Option<&Path>, line: Option<usize>, show: Show, lift: bool) -> Option<Line<'static>> {
+    let th = app.th.clone();
+    let Some(path) = path.filter(|p| show == Show::Diff || std::fs::symlink_metadata(p).is_ok()) else {
+        f.render_widget(Paragraph::new(Line::styled("  no preview", Style::default().fg(th.dim))), body);
+        return None;
+    };
     let hidden = app.hidden;
     let c = app.preview.get(path, line, body.width, &th, hidden, crate::preview::PREVIEW_LINES, show);
+    let head = (lift && c.diffed).then(|| c.lines.first().cloned()).flatten();
+    let all = &c.lines[head.is_some() as usize..];
     let base = c.focus.saturating_sub(body.height as usize / 3);
-    let start = (base + app.preview_scroll).min(c.lines.len().saturating_sub(1));
-    let lines: Vec<Line> = c.lines.iter().skip(start).take(body.height as usize).cloned().collect();
+    let start = (base + app.preview_scroll).min(all.len().saturating_sub(1));
+    let lines: Vec<Line> = all.iter().skip(start).take(body.height as usize).cloned().collect();
     f.render_widget(Paragraph::new(lines), Rect { x: body.x + 1, width: body.width.saturating_sub(1), ..body });
+    head
 }
 
 // ── viewer ──────────────────────────────────────────────────────────────────
@@ -928,17 +942,175 @@ fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Cells taken by `sp`.
+fn spans_w(sp: &[Span]) -> usize {
+    sp.iter().map(|s| s.content.width()).sum()
+}
+
+/// `left`, padding, then `right` when both fit in `w` cells (else `left` alone).
+fn spread(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, w: usize) -> Line<'static> {
+    let (lw, rw) = (spans_w(&left), spans_w(&right));
+    if lw + rw <= w {
+        left.push(Span::raw(" ".repeat(w - lw - rw)));
+        left.extend(right);
+    }
+    Line::from(left)
+}
+
+/// At most `w` cells of `s`; a long path keeps its tail behind `…`.
+fn clip(s: &str, w: usize, tail: bool) -> String {
+    if s.width() <= w {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 1;
+    let chars: Vec<char> = if tail { s.chars().rev().collect() } else { s.chars().collect() };
+    for c in chars {
+        if used + cw(c) > w {
+            break;
+        }
+        used += cw(c);
+        out.push(c);
+    }
+    if tail {
+        format!("…{}", out.chars().rev().collect::<String>())
+    } else {
+        format!("{out}…")
+    }
+}
+
+/// List panel heading.
+fn list_head(kind: FinderKind, zero: bool, transfer: bool) -> &'static str {
+    match kind {
+        _ if transfer => "DESTINATION",
+        _ if zero => "TO TRIAGE",
+        FinderKind::All => "FILES & FOLDERS",
+        FinderKind::Files => "FILES",
+        FinderKind::Dirs => "FOLDERS",
+        FinderKind::Grep => "MATCHES",
+        FinderKind::Recent => "RECENT FILES",
+        FinderKind::Git => "CHANGED FILES",
+        FinderKind::Dash => "TO TRIAGE",
+        FinderKind::Projects => "PROJECTS",
+    }
+}
+
+/// Preview panel heading, one row: git letter, name, size, age; on the
+/// right `:line` for a grep hit or `+N −M` and the bar for a diff (taken
+/// from `diff`, its file header: [`crate::diff::file_header`]).
+fn draw_preview_head(f: &mut Frame, th: &Theme, area: Rect, it: Option<&crate::finder::Item>, diff: Option<Line<'static>>) {
+    let Some(it) = it else { return };
+    let dim = Style::default().fg(th.dim);
+    let meta = std::fs::symlink_metadata(&it.abs).ok();
+    let name = it.abs.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| tilde(&it.abs));
+    let mut a = vec![Span::raw(" ")];
+    if let Some(g) = it.git {
+        a.push(Span::styled(format!("{} ", g.letter), Style::default().fg(git_color(th, g)).add_modifier(Modifier::BOLD)));
+    }
+    a.push(Span::styled(name, Style::default().fg(th.text).add_modifier(Modifier::BOLD)));
+    if let Some(m) = &meta {
+        if !m.is_dir() {
+            a.push(Span::styled(format!("  {}", entry::human_size(m.len())), dim));
+        }
+        let age = entry::age(m.modified().ok());
+        if !age.is_empty() {
+            a.push(Span::styled(format!(" · {age}"), dim));
+        }
+    }
+    let mut right = match diff {
+        Some(mut d) => {
+            let at = d.spans.iter().position(|s| s.content.starts_with("  +")).unwrap_or(d.spans.len());
+            d.spans.split_off(at)
+        }
+        None => vec![],
+    };
+    if let Some(l) = it.line {
+        right.push(Span::styled(format!(":{l}"), Style::default().fg(th.teal)));
+    }
+    right.push(Span::raw(" "));
+    f.render_widget(Paragraph::new(spread(a, right, area.width as usize)), area);
+}
+
 fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.th.clone();
-    let [prompt, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    // the title bar and panel headings only when there is room for them
+    let roomy = area.height >= 12;
+    let gap = Constraint::Length(roomy as u16);
+    let [bar, _, prompt, _, body] = Layout::vertical([gap, gap, Constraint::Length(1), gap, Constraint::Min(1)]).areas(area);
     let spin = SPIN[app.spinner % SPIN.len()];
     let preview_on = app.finder_preview && area.width >= 60;
     let transfer = app.transfer.as_ref().map(|t| (t.copy, t.count));
     let idle = app.last_key.elapsed() >= std::time::Duration::from_secs(2);
     let branch = app.buf().branch.as_ref().map(|b| b.badge());
     let Some(fd) = app.finder.as_mut() else { return };
+    let dim = Style::default().fg(th.dim);
 
-    // left: the sigil (or MOVE / COPY), then the query or a noun
+    // count, root, flags: the title bar's right side
+    let filtering = !fd.query.is_empty();
+    let (n, what) = match fd.kind {
+        FinderKind::Grep => (fd.len(), " hits".to_string()),
+        _ if fd.zero_view() => (fd.len(), " to triage".to_string()),
+        _ if filtering => (fd.len(), format!(" of {}", fd.total())),
+        _ => (fd.total(), String::new()),
+    };
+    let mut flags = String::new();
+    if fd.hidden {
+        flags.push_str(" +hidden");
+    }
+    if fd.no_ignore {
+        flags.push_str(" +ignored");
+    }
+    let trunc = if fd.truncated() { " (capped)" } else { "" };
+    let root = match fd.kind {
+        FinderKind::Projects => {
+            let roots = &fd.proj_settings.roots;
+            let first = roots.first().map(|r| tilde(r)).unwrap_or_default();
+            let more = if roots.len() > 1 { format!(" +{}", roots.len() - 1) } else { String::new() };
+            let scope = if fd.proj_scope == crate::projects::Scope::All { String::new() } else { format!("{} · ", fd.proj_scope.label()) };
+            format!("{scope}{first}{more}")
+        }
+        _ => tilde(&fd.root),
+    };
+    let walking = if fd.walking() { format!("{spin} ") } else { String::new() };
+
+    // title bar: brand, the sources (what is shown highlighted), count · root
+    if roomy {
+        let width = bar.width as usize;
+        let mut left = vec![Span::raw(" ")];
+        let mut right = vec![
+            Span::styled(walking.clone(), dim),
+            Span::styled(n.to_string(), Style::default().fg(th.text).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{what}   "), dim),
+        ];
+        // the path goes first on a narrow pane (shortened, then dropped)
+        let budget = width.saturating_sub(spans_w(&left) + spans_w(&right) + flags.width() + trunc.len() + 1).min(width * 2 / 5);
+        if budget >= 8 {
+            right.push(Span::styled(clip(&root, budget, true), dim));
+        }
+        right.push(Span::styled(flags.clone(), dim));
+        right.push(Span::styled(trunc, Style::default().fg(th.peach)));
+        right.push(Span::raw(" "));
+        let lead = if matches!(fd.kind, FinderKind::Files | FinderKind::Dirs | FinderKind::Dash) { fd.kind } else { FinderKind::All };
+        let tabs: Vec<Vec<Span<'static>>> = [lead, FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent]
+            .into_iter()
+            .map(|k| {
+                // the current source in its colour, the others dim
+                let st = if k == fd.kind && transfer.is_none() { Style::default().fg(kind_color(&th, k)).add_modifier(Modifier::BOLD) } else { dim };
+                vec![Span::styled(format!("{} {}", k.sigil().unwrap_or('›'), k.label().to_lowercase()), st), Span::raw("   ")]
+            })
+            .collect();
+        let rw = spans_w(&right);
+        for t in tabs {
+            if spans_w(&left) + spans_w(&t) + rw > width {
+                break;
+            }
+            left.extend(t);
+        }
+        f.render_widget(Paragraph::new(spread(left, right, width)), bar);
+    }
+
+    // prompt: the sigil (or MOVE / COPY), a query box led by the source,
+    // the branch on the right
     let ph = match fd.kind {
         _ if transfer.is_some() => "folder",
         FinderKind::Grep => "file contents",
@@ -950,115 +1122,75 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         FinderKind::All => "files & folders",
         FinderKind::Projects => "project or branch",
     };
+    let width = prompt.width as usize;
     let mut ps = vec![Span::raw(" ")];
     if let Some((copy, n)) = transfer {
         let label = format!(" {} {n} → ", if copy { "COPY" } else { "MOVE" });
         ps.push(Span::styled(label, Style::default().fg(Color::Black).bg(if copy { th.blue } else { th.peach }).add_modifier(Modifier::BOLD)));
+        ps.push(Span::raw(" "));
     } else {
         let sig = fd.kind.sigil().unwrap_or('›');
-        ps.push(Span::styled(sig.to_string(), Style::default().fg(kind_color(&th, fd.kind)).add_modifier(Modifier::BOLD)));
-        if fd.query.is_empty() && fd.kind.sigil().is_some() {
-            // a bare sigil is easy to miss: name the source while nothing is typed
-            ps.push(Span::styled(format!(" {}", fd.kind.label().to_lowercase()), Style::default().fg(th.dim)));
-        }
+        ps.push(Span::styled(format!("{sig} "), Style::default().fg(kind_color(&th, fd.kind)).add_modifier(Modifier::BOLD)));
     }
-    ps.push(Span::raw(" "));
-    let lead_w: usize = ps.iter().map(|s| s.content.width()).sum();
-    if fd.query.is_empty() {
-        ps.push(Span::styled(ph, Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
-    } else {
-        ps.push(Span::styled(fd.query.clone(), Style::default().fg(th.text)));
+    let mut right = vec![];
+    if !roomy {
+        right.push(Span::styled(format!("{walking}{n}{what}{flags}"), dim));
+        right.push(Span::styled(trunc, Style::default().fg(th.peach)));
+        right.push(Span::raw(" "));
+    } else if let Some(b) = &branch {
+        right.push(Span::styled(format!("{b}  "), dim));
     }
-    if !fd.marked.is_empty() {
-        ps.push(Span::styled(format!("   ● {} marked", fd.marked.len()), Style::default().fg(th.peach)));
-    }
-
-    // hint on hesitation: an idle, empty All / Files prompt names the sigils
-    if idle && fd.query.is_empty() && transfer.is_none() && matches!(fd.kind, FinderKind::All | FinderKind::Files) {
-        let mut hint = vec![Span::styled("   or start with ", Style::default().fg(th.dim))];
-        for k in [FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent] {
-            hint.push(Span::styled(k.sigil().unwrap_or(' ').to_string(), Style::default().fg(kind_color(&th, k)).add_modifier(Modifier::BOLD)));
-            hint.push(Span::styled(format!(" {}  ", k.label().to_lowercase()), Style::default().fg(th.dim)));
-        }
-        let hw: usize = hint.iter().map(|s| s.content.width()).sum();
-        let used: usize = ps.iter().map(|s| s.content.width()).sum();
-        if used + hw <= prompt.width as usize {
-            ps.extend(hint);
-        }
-    }
-
-    // right: count · root, flags only when not default
-    let filtering = !fd.query.is_empty();
-    let count = match fd.kind {
-        FinderKind::Grep => format!("{} hits", fd.len()),
-        _ if fd.zero_view() => format!("{} to triage", fd.len()),
-        _ if filtering => format!("{} of {}", fd.len(), fd.total()),
-        _ => fd.total().to_string(),
-    };
-    let count = if fd.walking() { format!("{spin} {count}") } else { count };
-    let mut flags = String::new();
-    if fd.hidden {
-        flags.push_str(" +hidden");
-    }
-    if fd.no_ignore {
-        flags.push_str(" +ignored");
-    }
-    let trunc = if fd.truncated() { " (capped)" } else { "" };
-    let root = match fd.kind {
-        FinderKind::Git => branch.unwrap_or_else(|| tilde(&fd.root)),
-        FinderKind::Projects => {
-            let roots = &fd.proj_settings.roots;
-            let first = roots.first().map(|r| tilde(r)).unwrap_or_default();
-            let more = if roots.len() > 1 { format!(" +{}", roots.len() - 1) } else { String::new() };
-            let scope = if fd.proj_scope == crate::projects::Scope::All { String::new() } else { format!("{} · ", fd.proj_scope.label()) };
-            format!("{scope}{first}{more}")
-        }
-        _ => tilde(&fd.root),
-    };
-    let used: usize = ps.iter().map(|s| s.content.width()).sum();
-    let width = prompt.width as usize;
-    // the path goes first on a narrow popup (shortened, then dropped), then the count
-    let fixed = count.width() + flags.width() + trunc.len() + 2;
-    let budget = width.saturating_sub(used + fixed + 5).min(width * 2 / 5);
-    let mut right = if budget >= 8 {
-        let r = if root.width() > budget {
-            let tail: String = root.chars().rev().take(budget - 1).collect::<Vec<_>>().into_iter().rev().collect();
-            format!("…{tail}")
-        } else {
-            root
-        };
-        format!("{count} · {r}{flags}  ")
-    } else {
-        format!("{count}{flags}  ")
-    };
-    if used + right.width() + trunc.len() + 2 > width {
+    if spans_w(&ps) + spans_w(&right) + 24 > width {
         right.clear();
     }
-    let used: usize = ps.iter().map(|s| s.content.width()).sum();
-    let pad = width.saturating_sub(used + right.width() + trunc.len());
-    ps.push(Span::raw(" ".repeat(pad)));
-    ps.push(Span::styled(right, Style::default().fg(th.dim)));
-    ps.push(Span::styled(trunc, Style::default().fg(th.peach)));
+    let box_w = width.saturating_sub(spans_w(&ps) + spans_w(&right));
+    let mut bx = vec![];
+    let lead_w = spans_w(&ps) + spans_w(&bx);
+    if fd.query.is_empty() {
+        // on hesitation an empty All / Files prompt names the sigils too
+        let switch = if idle && transfer.is_none() && matches!(fd.kind, FinderKind::All | FinderKind::Files) { " · or start with / @ + < to switch" } else { "" };
+        let room = box_w.saturating_sub(spans_w(&bx) + 1);
+        bx.push(Span::styled(clip(&format!("{ph}{switch}"), room, false), Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
+    } else {
+        bx.push(Span::styled(fd.query.clone(), Style::default().fg(th.text)));
+    }
+    if !fd.marked.is_empty() {
+        bx.push(Span::styled(format!("   ● {} marked", fd.marked.len()), Style::default().fg(th.peach)));
+    }
+    let used = spans_w(&bx);
+    bx.push(Span::raw(" ".repeat(box_w.saturating_sub(used))));
+    ps.extend(bx);
+    ps.extend(right);
     f.render_widget(Paragraph::new(Line::from(ps)), prompt);
     let qx: usize = fd.query.chars().take(fd.qcur).map(|c| c.to_string().width()).sum();
     if matches!(app.overlay, Overlay::None) {
         f.set_cursor_position(Position::new(prompt.x + lead_w as u16 + qx as u16, prompt.y));
     }
 
-    let [sep, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(body);
+    // panels: headings, a rule, list | preview
+    let [head, sep, rest] = Layout::vertical([Constraint::Length(roomy as u16), Constraint::Length(1), Constraint::Min(1)]).areas(body);
     let (list, prev) = split_preview(rest, preview_on);
+    let (lhead, phead) = split_preview(head, preview_on);
     let mut rule: String = "─".repeat(sep.width as usize);
-    let list_inner = if prev.is_some() {
-        let jx = (list.width.saturating_sub(1)) as usize;
-        rule = rule.chars().enumerate().map(|(i, c)| if i == jx { '┬' } else { c }).collect();
+    let divide = |f: &mut Frame, r: Rect| {
         let blk = Block::default().borders(Borders::RIGHT).border_style(Style::default().fg(th.dim));
-        let inner = blk.inner(list);
-        f.render_widget(blk, list);
+        let inner = blk.inner(r);
+        f.render_widget(blk, r);
         inner
+    };
+    let (list_inner, lhead) = if prev.is_some() {
+        let jx = (list.width.saturating_sub(1)) as usize;
+        rule = rule.chars().enumerate().map(|(i, c)| if i == jx { if roomy { '┼' } else { '┬' } } else { c }).collect();
+        (divide(f, list), divide(f, lhead))
     } else {
-        list
+        (list, lhead)
     };
     f.render_widget(Paragraph::new(Line::styled(rule, Style::default().fg(th.dim))), sep);
+    if roomy {
+        let title = list_head(fd.kind, fd.zero_view(), transfer.is_some());
+        let count = vec![Span::styled(format!("{} ", fd.len()), dim)];
+        f.render_widget(Paragraph::new(spread(vec![Span::styled(format!(" {title}"), Style::default().fg(th.subtext).add_modifier(Modifier::BOLD))], count, lhead.width as usize)), lhead);
+    }
     let h = list_inner.height as usize;
     fd.follow(h);
     let (scroll, sel) = (fd.scroll, fd.sel);
@@ -1153,17 +1285,24 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let q = app.finder.as_ref().map(|f| f.query.clone()).unwrap_or_default();
     app.finder_foot = finder_foot(kind, sel_item.as_ref(), marked.len(), transfer, &q);
     if let Some(p) = prev {
-        let inner = p;
-        match sel_item {
+        let (path, line, show) = match &sel_item {
             Some(it) => {
                 let show = match (&it.proj, it.git) {
                     (Some(_), _) => Show::Project,
                     (_, Some(_)) => Show::Diff,
                     _ => Show::File,
                 };
-                draw_preview(f, app, inner, Some(&it.abs), it.line, show)
+                (Some(it.abs.as_path()), it.line, show)
             }
-            None => draw_preview(f, app, inner, None, None, Show::File),
+            None => (None, None, Show::File),
+        };
+        if roomy {
+            let head = draw_preview_body(f, app, p, path, line, show, true);
+            if let Some(ph) = phead {
+                draw_preview_head(f, &th, ph, sel_item.as_ref(), head);
+            }
+        } else {
+            draw_preview(f, app, p, path, line, show);
         }
     }
     if app.finder_sheet {
@@ -1437,11 +1576,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(sp)), area);
 }
 
-/// Finder footer: messages on the left, the selected row's verbs and a
-/// fixed `? keys` on the right. No mode badge: the prompt's sigil is the mode.
+/// Finder footer: the FIND badge, a message (else the position and marks)
+/// on the left, the selected row's verbs, `esc back` and `? keys` on the right.
 fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.th;
-    let mut sp = vec![Span::raw(" ")];
+    let mut sp = vec![Span::styled(" FIND ", Style::default().fg(Color::Black).bg(th.blue).add_modifier(Modifier::BOLD)), Span::raw(" ")];
     if let Some((m, k, _)) = &app.msg {
         let c = match k {
             MsgKind::Info => th.subtext,
@@ -1450,6 +1589,12 @@ fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
             MsgKind::Err => th.red,
         };
         sp.push(Span::styled(m.clone(), Style::default().fg(c)));
+    } else if let Some(fd) = app.finder.as_ref().filter(|fd| fd.len() > 0) {
+        let mut at = format!("{} of {}", fd.sel + 1, fd.len());
+        if !fd.marked.is_empty() {
+            at.push_str(&format!(" · {} marked", fd.marked.len()));
+        }
+        sp.push(Span::styled(at, Style::default().fg(th.dim)));
     }
     let mut hs = Vec::new();
     for (i, (k, v)) in app.finder_foot.iter().enumerate() {
@@ -1459,7 +1604,12 @@ fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
         hs.push(Span::styled(format!(" {k}"), Style::default().fg(th.accent)));
         hs.push(Span::styled(format!(" {v}"), Style::default().fg(th.subtext)));
     }
-    let keys = [Span::styled("    ? ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled("keys ", Style::default().fg(th.dim))];
+    let keys = [
+        Span::styled("    esc ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("back  ", Style::default().fg(th.dim)),
+        Span::styled("? ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
+        Span::styled("keys ", Style::default().fg(th.dim)),
+    ];
     let used: usize = sp.iter().map(|s| s.content.width()).sum();
     let kw: usize = keys.iter().map(|s| s.content.width()).sum();
     let mut hw: usize = hs.iter().map(|s| s.content.width()).sum();

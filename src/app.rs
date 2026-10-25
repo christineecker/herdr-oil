@@ -2533,22 +2533,27 @@ mod tests {
     }
 
     #[test]
-    fn finder_quiet_prompt() {
+    fn finder_chrome() {
         let (_t, mut app) = app_in("app-quiet");
         let key = |app: &mut App, c: KeyCode| app.finder_key(KeyEvent::new(c, KeyModifiers::NONE));
         app.act(Action::Finder(FinderKind::All));
-        let rows = screen(&mut app, 100, 20);
+        let rows = screen(&mut app, 120, 20);
         let text = rows.join("\n");
-        // one header row: the prompt with its sigil and a noun, no key hints
-        assert!(rows.iter().any(|r| r.contains("› files & folders")), "{text}");
-        assert!(!text.contains("FIND") && !text.contains("⌫ all") && !text.contains("␣ sources"), "{text}");
-        assert!(rows.last().unwrap().contains("? keys"), "{text}");
+        // the sources, a gap, the prompt, a gap, the panel headings
+        assert!(rows[0].contains("› all") && rows[0].contains("/ grep") && rows[0].contains("+ changes"), "{text}");
+        assert!(rows[1].trim().is_empty() && rows[3].trim().is_empty(), "{text}");
+        assert!(rows[2].contains("› files & folders"), "{text}");
+        assert!(rows[4].contains("TO TRIAGE"), "{text}");
+        assert!(rows.last().unwrap().contains("FIND") && rows.last().unwrap().contains("? keys"), "{text}");
         // after two idle seconds the placeholder names the sigils
         app.last_key = Instant::now() - Duration::from_secs(3);
-        assert!(screen(&mut app, 100, 20).join("\n").contains("or start with / grep"));
+        assert!(screen(&mut app, 120, 20).join("\n").contains("or start with / @ + < to switch"));
         key(&mut app, KeyCode::Char('@'));
-        let rows = screen(&mut app, 100, 20);
-        assert!(rows.iter().any(|r| r.contains("@ projects project or branch")), "{}", rows.join("\n"));
+        let rows = screen(&mut app, 120, 20);
+        assert!(rows[2].contains("@ project or branch"), "{}", rows.join("\n"));
+        // a short pane keeps only the prompt and the list
+        let rows = screen(&mut app, 120, 10);
+        assert!(rows[0].contains("@ project or branch") && !rows.iter().any(|r| r.contains("PROJECTS")), "{}", rows.join("\n"));
         // ? opens the full sheet; a letter still picks a source
         key(&mut app, KeyCode::Char('?'));
         assert!(app.finder_sheet);
