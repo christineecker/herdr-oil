@@ -116,6 +116,12 @@ pub struct App {
     pub finder_preview: bool,
     /// The finder's ␣ menu (pick a source) is open.
     pub finder_menu: bool,
+    /// `?` opened the full sheet (sources, row keys, view keys) instead.
+    pub finder_sheet: bool,
+    /// Finder footer: key / verb pairs for the selected row, set while drawing.
+    pub finder_foot: Vec<(String, String)>,
+    /// Last keypress, for the finder's hint on hesitation.
+    pub last_key: Instant,
     pub view: View,
     pub finder: Option<Finder>,
     /// Finder opened on its own (launch mode) — Esc quits instead of going back.
@@ -321,6 +327,9 @@ impl App {
             preview_on: cfg.preview,
             finder_preview: true,
             finder_menu: false,
+            finder_sheet: false,
+            finder_foot: vec![],
+            last_key: Instant::now(),
             view: View::Explorer,
             finder: None,
             finder_only: false,
@@ -697,6 +706,7 @@ impl App {
 
     fn open_finder(&mut self, k: FinderKind) {
         self.finder_menu = false;
+        self.finder_sheet = false;
         if matches!(k, FinderKind::Dash | FinderKind::All) {
             let pending = self.pending_tags();
             let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, self.cwd.clone(), &self.cfg));
@@ -1579,6 +1589,7 @@ impl App {
         if k.kind == KeyEventKind::Release {
             return;
         }
+        self.last_key = Instant::now();
         if !matches!(self.overlay, Overlay::None) {
             self.overlay_key(k);
             return;
@@ -1791,8 +1802,9 @@ impl App {
                 _ => {}
             }
         } else if self.finder_menu {
-            // ␣ menu: a letter picks the source, anything else closes it
+            // ␣ menu / ? sheet: a letter picks the source, anything else closes it
             self.finder_menu = false;
+            self.finder_sheet = false;
             if let (KeyCode::Char(c), false, false) = (k.code, ctrl, alt) {
                 if let Some(kind) = FinderKind::from_leader(c) {
                     self.finder_switch(kind);
@@ -1801,6 +1813,7 @@ impl App {
             return;
         } else if matches!((k.code, ctrl, alt), (KeyCode::Char(' ' | '?'), false, false)) && self.finder.as_ref().is_some_and(|f| f.query.is_empty()) {
             self.finder_menu = true;
+            self.finder_sheet = k.code == KeyCode::Char('?');
             return;
         }
         if self.transfer.is_none() && self.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) && self.project_key(k) {
@@ -2510,6 +2523,39 @@ mod tests {
         key(&mut app, KeyCode::Backspace);
         key(&mut app, KeyCode::Backspace);
         assert_eq!(app.view, View::Explorer);
+    }
+
+    fn screen(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        term.draw(|fr| crate::ui::draw(fr, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn finder_quiet_prompt() {
+        let (_t, mut app) = app_in("app-quiet");
+        let key = |app: &mut App, c: KeyCode| app.finder_key(KeyEvent::new(c, KeyModifiers::NONE));
+        app.act(Action::Finder(FinderKind::All));
+        let rows = screen(&mut app, 100, 20);
+        let text = rows.join("\n");
+        // one header row: the prompt with its sigil and a noun, no key hints
+        assert!(rows.iter().any(|r| r.contains("› files & folders")), "{text}");
+        assert!(!text.contains("FIND") && !text.contains("⌫ all") && !text.contains("␣ sources"), "{text}");
+        assert!(rows.last().unwrap().contains("? keys"), "{text}");
+        // after two idle seconds the placeholder names the sigils
+        app.last_key = Instant::now() - Duration::from_secs(3);
+        assert!(screen(&mut app, 100, 20).join("\n").contains("or start with / grep"));
+        key(&mut app, KeyCode::Char('@'));
+        let rows = screen(&mut app, 100, 20);
+        assert!(rows.iter().any(|r| r.contains("@ projects project or branch")), "{}", rows.join("\n"));
+        // ? opens the full sheet; a letter still picks a source
+        key(&mut app, KeyCode::Char('?'));
+        assert!(app.finder_sheet);
+        assert!(screen(&mut app, 100, 30).join("\n").contains("? keys"));
+        key(&mut app, KeyCode::Char('g'));
+        assert!(!app.finder_sheet && !app.finder_menu);
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::Grep);
     }
 
     fn row_of(app: &App, name: &str) -> usize {

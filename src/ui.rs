@@ -858,86 +858,112 @@ fn draw_finder_menu(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// `?` in the finder: sources, keys for this source's rows, view keys,
+/// query syntax. The only complete list; letters still pick a source.
+fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
+    let rows: &[(&str, &str)] = match cur {
+        FinderKind::Projects => &[("⏎", "hop (focus or open its workspace)"), ("^t", "new tab"), ("^o", "explore"), ("^f alt-g", "files / grep inside"), ("^n", "new project from query"), ("^x", "forget"), ("^k ^k", "close its workspace or tab")],
+        FinderKind::Git => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("^s", "send")],
+        _ => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines")],
+    };
+    let mut view: Vec<(&str, &str)> = vec![("⇥", "next group"), ("^r", "root"), ("alt-h alt-i", "hidden / ignored"), ("alt-p", "preview"), ("esc", "back")];
+    if cur == FinderKind::Projects {
+        view.insert(0, ("^a", "scope: all → open → dirty → recent"));
+    }
+    let syntax = match cur {
+        FinderKind::Grep => Some("foo -- *.rs -t py   (smart-case)"),
+        FinderKind::Projects | FinderKind::Git | FinderKind::Dash => None,
+        _ => Some("'exact ^prefix suffix$ !not"),
+    };
+    let key = Style::default().fg(th.accent).add_modifier(Modifier::BOLD);
+    let head = |t: &str| Span::styled(format!(" {t:<8}"), Style::default().fg(th.dim));
+    let mut lines = vec![];
+    let mut src = vec![head("source")];
+    for k in [FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent] {
+        src.push(Span::styled(format!("{} ", k.sigil().unwrap_or(' ')), Style::default().fg(kind_color(th, k)).add_modifier(Modifier::BOLD)));
+        src.push(Span::styled(format!("{}  ", k.label().to_lowercase()), Style::default().fg(th.text)));
+    }
+    src.push(Span::styled("⌫ ", key));
+    src.push(Span::styled("all ", Style::default().fg(th.text)));
+    lines.push(Line::from(src));
+    let mut letters = vec![head(""), Span::styled("␣ ", key), Span::styled("pick: ", Style::default().fg(th.text))];
+    for (c, k, _) in SOURCES {
+        letters.push(Span::styled(c.to_string(), Style::default().fg(th.yellow).add_modifier(Modifier::BOLD)));
+        letters.push(Span::styled(format!(" {}  ", k.label().to_lowercase()), Style::default().fg(if *k == cur { kind_color(th, *k) } else { th.subtext })));
+    }
+    lines.push(Line::from(letters));
+    let section = |name: &str, pairs: &[(&str, &str)], lines: &mut Vec<Line>| {
+        lines.push(Line::raw(""));
+        // two pairs per line keeps the sheet short; columns line up
+        let kw = |c: usize| pairs.iter().skip(c).step_by(2).map(|(k, _)| k.width()).max().unwrap_or(0);
+        let vw = pairs.iter().step_by(2).map(|(_, v)| v.width()).max().unwrap_or(0);
+        for (i, ch) in pairs.chunks(2).enumerate() {
+            let mut sp = vec![head(if i == 0 { name } else { "" })];
+            for (c, (k, v)) in ch.iter().enumerate() {
+                sp.push(Span::styled(format!("{k}{} ", " ".repeat(kw(c) - k.width())), key));
+                let pad = if c == 0 { vw - v.width() + 3 } else { 1 };
+                sp.push(Span::styled(format!("{v}{}", " ".repeat(pad)), Style::default().fg(th.text)));
+            }
+            lines.push(Line::from(sp));
+        }
+    };
+    section(&cur.label().to_lowercase(), rows, &mut lines);
+    section("view", &view, &mut lines);
+    if let Some(sx) = syntax {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![head("query"), Span::styled(sx, Style::default().fg(th.subtext))]));
+    }
+    let w = lines.iter().map(|l| l.width()).max().unwrap_or(20) as u16 + 2;
+    let h = lines.len() as u16 + 2;
+    let r = Rect {
+        x: area.right().saturating_sub(w + 1).max(area.x),
+        y: area.bottom().saturating_sub(h).max(area.y),
+        width: w.min(area.width),
+        height: h.min(area.height),
+    };
+    f.render_widget(Clear, r);
+    let blk = frame(th, "? keys", th.accent);
+    let inner = blk.inner(r);
+    f.render_widget(blk, r);
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.th.clone();
-    let [tabs, prompt, body] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let [prompt, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let spin = SPIN[app.spinner % SPIN.len()];
     let preview_on = app.finder_preview && area.width >= 60;
     let transfer = app.transfer.as_ref().map(|t| (t.copy, t.count));
+    let idle = app.last_key.elapsed() >= std::time::Duration::from_secs(2);
+    let branch = app.buf().branch.as_ref().map(|b| b.badge());
     let Some(fd) = app.finder.as_mut() else { return };
 
-    // hint line: how to reach the other sources from here
-    let keys: &[(&str, &str)] = match fd.kind {
-        _ if transfer.is_some() => &[("⇥", "files ⇄ folders")],
-        FinderKind::All | FinderKind::Files => &[("/", "grep"), ("@", "projects"), ("+", "changes"), ("<", "recent"), ("␣", "sources")],
-        _ => &[("⌫", "all"), ("⇥", "next group"), ("␣", "sources")],
-    };
-    let mut ts = vec![Span::raw(" ")];
-    for (k, v) in keys {
-        ts.push(Span::styled(format!("{k} "), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)));
-        ts.push(Span::styled(format!("{v}  "), Style::default().fg(th.dim)));
-    }
-    let mut flags = String::new();
-    if fd.hidden {
-        flags.push_str(" +hidden");
-    }
-    if fd.no_ignore {
-        flags.push_str(" +ignored");
-    }
-    let count = match fd.kind {
-        FinderKind::Grep => format!("{} hits", fd.len()),
-        _ if fd.zero_view() => format!("{} to triage", fd.len()),
-        _ => format!("{}/{}", fd.len(), fd.total()),
-    };
-    let trunc = if fd.truncated() { " (capped)" } else { "" };
-    let used: usize = ts.iter().map(|s| s.content.width()).sum();
-    let lead = format!("{}{}  \u{f07b} ", if fd.walking() { format!("{spin} ") } else { String::new() }, count);
-    let budget = (tabs.width as usize).saturating_sub(used + lead.width() + flags.width() + trunc.len() + 3).max(6);
-    let mut root = match fd.kind {
-        FinderKind::Projects => {
-            let roots = &fd.proj_settings.roots;
-            let first = roots.first().map(|r| tilde(r)).unwrap_or_default();
-            let more = if roots.len() > 1 { format!(" +{}", roots.len() - 1) } else { String::new() };
-            format!("{} · {first}{more}", fd.proj_scope.label())
-        }
-        _ => tilde(&fd.root),
-    };
-    if root.width() > budget {
-        let tail: String = root.chars().rev().take(budget - 1).collect::<Vec<_>>().into_iter().rev().collect();
-        root = format!("…{tail}");
-    }
-    let right = format!("{lead}{root}{flags}  ");
-    let pad = (tabs.width as usize).saturating_sub(used + right.width() + trunc.len());
-    ts.push(Span::raw(" ".repeat(pad)));
-    ts.push(Span::styled(right, Style::default().fg(th.dim)));
-    ts.push(Span::styled(trunc, Style::default().fg(th.peach)));
-    f.render_widget(Paragraph::new(Line::from(ts)), tabs);
-
-    // prompt
+    // left: the sigil (or MOVE / COPY), then the query or a noun
     let ph = match fd.kind {
-        _ if transfer.is_some() => "pick the destination folder (a file means its folder)…",
-        FinderKind::Grep => "search file contents (ripgrep, smart-case)  · foo -- *.rs -t py",
-        FinderKind::Dirs => "fuzzy-find directories…",
-        FinderKind::Recent => "recently opened files…",
-        FinderKind::Git => "changed & untracked files — ⏎ diff view · ^a stage/unstage · alt-d discard…",
-        FinderKind::Dash => "pending edits · git changes · marked · recent…",
-        FinderKind::Files => "fuzzy-find files  ('exact ^prefix suffix$ !not)",
-        FinderKind::All => "find files & folders  ('exact ^prefix suffix$ !not) · start with / @ + < to switch",
-        FinderKind::Projects => "hop to a project (name or branch) — ⏎ workspace · ^t tab · ^o explore · ^f files · ^n new…",
+        _ if transfer.is_some() => "folder",
+        FinderKind::Grep => "file contents",
+        FinderKind::Dirs => "folders",
+        FinderKind::Recent => "recent files",
+        FinderKind::Git => "changed files",
+        FinderKind::Dash => "pending, changed, marked, recent",
+        FinderKind::Files => "files",
+        FinderKind::All => "files & folders",
+        FinderKind::Projects => "project or branch",
     };
-    let chip = format!(" {} ", fd.kind.label());
-    let mut lead_w = 1 + chip.width() + 1;
-    let mut ps = vec![
-        Span::raw(" "),
-        Span::styled(chip, Style::default().fg(Color::Black).bg(kind_color(&th, fd.kind)).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-    ];
+    let mut ps = vec![Span::raw(" ")];
     if let Some((copy, n)) = transfer {
         let label = format!(" {} {n} → ", if copy { "COPY" } else { "MOVE" });
-        lead_w += label.width() + 1;
         ps.push(Span::styled(label, Style::default().fg(Color::Black).bg(if copy { th.blue } else { th.peach }).add_modifier(Modifier::BOLD)));
-        ps.push(Span::raw(" "));
+    } else {
+        let sig = fd.kind.sigil().unwrap_or('›');
+        ps.push(Span::styled(sig.to_string(), Style::default().fg(kind_color(&th, fd.kind)).add_modifier(Modifier::BOLD)));
+        if fd.query.is_empty() && fd.kind.sigil().is_some() {
+            // a bare sigil is easy to miss: name the source while nothing is typed
+            ps.push(Span::styled(format!(" {}", fd.kind.label().to_lowercase()), Style::default().fg(th.dim)));
+        }
     }
+    ps.push(Span::raw(" "));
+    let lead_w: usize = ps.iter().map(|s| s.content.width()).sum();
     if fd.query.is_empty() {
         ps.push(Span::styled(ph, Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
     } else {
@@ -946,6 +972,73 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     if !fd.marked.is_empty() {
         ps.push(Span::styled(format!("   ● {} marked", fd.marked.len()), Style::default().fg(th.peach)));
     }
+
+    // hint on hesitation: an idle, empty All / Files prompt names the sigils
+    if idle && fd.query.is_empty() && transfer.is_none() && matches!(fd.kind, FinderKind::All | FinderKind::Files) {
+        let mut hint = vec![Span::styled("   or start with ", Style::default().fg(th.dim))];
+        for k in [FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent] {
+            hint.push(Span::styled(k.sigil().unwrap_or(' ').to_string(), Style::default().fg(kind_color(&th, k)).add_modifier(Modifier::BOLD)));
+            hint.push(Span::styled(format!(" {}  ", k.label().to_lowercase()), Style::default().fg(th.dim)));
+        }
+        let hw: usize = hint.iter().map(|s| s.content.width()).sum();
+        let used: usize = ps.iter().map(|s| s.content.width()).sum();
+        if used + hw <= prompt.width as usize {
+            ps.extend(hint);
+        }
+    }
+
+    // right: count · root, flags only when not default
+    let filtering = !fd.query.is_empty();
+    let count = match fd.kind {
+        FinderKind::Grep => format!("{} hits", fd.len()),
+        _ if fd.zero_view() => format!("{} to triage", fd.len()),
+        _ if filtering => format!("{} of {}", fd.len(), fd.total()),
+        _ => fd.total().to_string(),
+    };
+    let count = if fd.walking() { format!("{spin} {count}") } else { count };
+    let mut flags = String::new();
+    if fd.hidden {
+        flags.push_str(" +hidden");
+    }
+    if fd.no_ignore {
+        flags.push_str(" +ignored");
+    }
+    let trunc = if fd.truncated() { " (capped)" } else { "" };
+    let root = match fd.kind {
+        FinderKind::Git => branch.unwrap_or_else(|| tilde(&fd.root)),
+        FinderKind::Projects => {
+            let roots = &fd.proj_settings.roots;
+            let first = roots.first().map(|r| tilde(r)).unwrap_or_default();
+            let more = if roots.len() > 1 { format!(" +{}", roots.len() - 1) } else { String::new() };
+            let scope = if fd.proj_scope == crate::projects::Scope::All { String::new() } else { format!("{} · ", fd.proj_scope.label()) };
+            format!("{scope}{first}{more}")
+        }
+        _ => tilde(&fd.root),
+    };
+    let used: usize = ps.iter().map(|s| s.content.width()).sum();
+    let width = prompt.width as usize;
+    // the path goes first on a narrow popup (shortened, then dropped), then the count
+    let fixed = count.width() + flags.width() + trunc.len() + 2;
+    let budget = width.saturating_sub(used + fixed + 5).min(width * 2 / 5);
+    let mut right = if budget >= 8 {
+        let r = if root.width() > budget {
+            let tail: String = root.chars().rev().take(budget - 1).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("…{tail}")
+        } else {
+            root
+        };
+        format!("{count} · {r}{flags}  ")
+    } else {
+        format!("{count}{flags}  ")
+    };
+    if used + right.width() + trunc.len() + 2 > width {
+        right.clear();
+    }
+    let used: usize = ps.iter().map(|s| s.content.width()).sum();
+    let pad = width.saturating_sub(used + right.width() + trunc.len());
+    ps.push(Span::raw(" ".repeat(pad)));
+    ps.push(Span::styled(right, Style::default().fg(th.dim)));
+    ps.push(Span::styled(trunc, Style::default().fg(th.peach)));
     f.render_widget(Paragraph::new(Line::from(ps)), prompt);
     let qx: usize = fd.query.chars().take(fd.qcur).map(|c| c.to_string().width()).sum();
     if matches!(app.overlay, Overlay::None) {
@@ -1056,8 +1149,10 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     }
     app.list_area = list_inner;
     f.render_widget(Paragraph::new(lines), list_inner);
+    let sel_item = items.into_iter().nth(sel.saturating_sub(scroll)).filter(|_| sel >= scroll);
+    let q = app.finder.as_ref().map(|f| f.query.clone()).unwrap_or_default();
+    app.finder_foot = finder_foot(kind, sel_item.as_ref(), marked.len(), transfer, &q);
     if let Some(p) = prev {
-        let sel_item = items.into_iter().nth(sel.saturating_sub(scroll)).filter(|_| sel >= scroll);
         let inner = p;
         match sel_item {
             Some(it) => {
@@ -1071,9 +1166,49 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
             None => draw_preview(f, app, inner, None, None, Show::File),
         }
     }
-    if app.finder_menu {
+    if app.finder_sheet {
+        draw_finder_sheet(f, &th, body, kind);
+    } else if app.finder_menu {
         let cur = app.finder.as_ref().map(|f| f.kind).unwrap_or(FinderKind::All);
         draw_finder_menu(f, &th, body, cur);
+    }
+}
+
+/// Finder footer: at most two verbs for the selected row (or the marks).
+fn finder_foot(kind: FinderKind, it: Option<&crate::finder::Item>, marked: usize, transfer: Option<(bool, usize)>, query: &str) -> Vec<(String, String)> {
+    let p = |k: &str, v: String| (k.to_string(), v);
+    if let Some((copy, n)) = transfer {
+        let verb = if copy { "copy" } else { "move" };
+        return vec![p("⏎", format!("{verb} {n} here")), p("^n", "new folder".into())];
+    }
+    if marked > 0 {
+        return match kind {
+            FinderKind::Git => vec![p("^a", format!("stage {marked}")), p("^s", format!("send {marked}"))],
+            _ => vec![p("⏎", format!("open {marked}")), p("^s", format!("send {marked}"))],
+        };
+    }
+    let Some(it) = it else {
+        return match kind {
+            FinderKind::Projects if !query.trim().is_empty() => vec![p("^n", format!("create \"{}\"", query.trim()))],
+            _ => vec![],
+        };
+    };
+    if let Some(pr) = &it.proj {
+        return match pr.ws {
+            Some(_) => vec![p("⏎", "focus workspace".into()), p("^t", "tab".into())],
+            None => vec![p("⏎", "open workspace".into()), p("^o", "explore".into())],
+        };
+    }
+    if kind == FinderKind::Git {
+        let staged = it.git.is_some_and(|g| g.staged && !g.unstaged);
+        return vec![p("⏎", "diff".into()), p("^a", if staged { "unstage" } else { "stage" }.into())];
+    }
+    if it.is_dir {
+        return vec![p("⏎", "explore".into())];
+    }
+    match it.line {
+        Some(l) => vec![p("⏎", format!("open at {l}")), p("^v", "split".into())],
+        None => vec![p("⏎", "open".into()), p("^v", "split".into())],
     }
 }
 
@@ -1254,8 +1389,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         f.set_cursor_position(Position::new(area.x + 1 + x as u16, area.y));
         return;
     }
+    if app.view == View::Finder {
+        draw_finder_status(f, app, area);
+        return;
+    }
     let (label, bg) = match (app.view, &app.vim.mode) {
-        (View::Finder, _) => (" FIND ", th.blue),
         (View::Viewer, _) => (" VIEW ", th.teal),
         (_, Mode::Normal) => (" OIL ", th.accent),
         (_, Mode::Insert) => (" INSERT ", th.green),
@@ -1279,10 +1417,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
         (View::Viewer, _) if app.viewer.as_ref().is_some_and(|v| v.diff) => &[("]c [c", "hunk"), ("⇥", "file"), ("s", "split"), ("w", "whitespace"), ("z", "expand"), ("v", "viewed"), ("c", "compare"), ("⏎", "open at line"), ("q", "back")],
         (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("/ n N", "search"), ("d", "diff"), ("L", "log"), ("e", "edit here"), ("p", "send"), ("q", "back")],
-        (View::Finder, _) if app.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Git) => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("⇥", "group"), ("esc", "back")],
-        (View::Finder, _) if app.transfer.is_none() && app.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) => &[("⏎", "hop"), ("^t", "tab"), ("^o", "explore"), ("^f", "files"), ("^n", "new"), ("^a", "scope"), ("^k", "close ws"), ("esc", "back")],
-        (View::Finder, _) if app.transfer.is_some() => &[("⏎", "here"), ("^n", "new folder from query"), ("⇥", "files/dirs"), ("^r", "root"), ("esc", "cancel")],
-        (View::Finder, _) => &[("⏎", "open"), ("^v", "split"), ("^o", "reveal"), ("^s", "send"), ("⇥", "group"), ("^r", "root"), ("esc", "back")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
         (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("I A", "prefix/suffix"), (":", "s/…/…/"), ("esc", "cancel")],
         _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "find"), ("g?", "help"), ("esc", "close")],
@@ -1299,6 +1433,44 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     if used + hw + 1 < area.width as usize {
         sp.push(Span::raw(" ".repeat(area.width as usize - used - hw - 1)));
         sp.extend(hs);
+    }
+    f.render_widget(Paragraph::new(Line::from(sp)), area);
+}
+
+/// Finder footer: messages on the left, the selected row's verbs and a
+/// fixed `? keys` on the right. No mode badge: the prompt's sigil is the mode.
+fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
+    let th = &app.th;
+    let mut sp = vec![Span::raw(" ")];
+    if let Some((m, k, _)) = &app.msg {
+        let c = match k {
+            MsgKind::Info => th.subtext,
+            MsgKind::Ok => th.green,
+            MsgKind::Warn => th.yellow,
+            MsgKind::Err => th.red,
+        };
+        sp.push(Span::styled(m.clone(), Style::default().fg(c)));
+    }
+    let mut hs = Vec::new();
+    for (i, (k, v)) in app.finder_foot.iter().enumerate() {
+        if i > 0 {
+            hs.push(Span::styled("  ·", Style::default().fg(th.dim)));
+        }
+        hs.push(Span::styled(format!(" {k}"), Style::default().fg(th.accent)));
+        hs.push(Span::styled(format!(" {v}"), Style::default().fg(th.subtext)));
+    }
+    let keys = [Span::styled("    ? ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled("keys ", Style::default().fg(th.dim))];
+    let used: usize = sp.iter().map(|s| s.content.width()).sum();
+    let kw: usize = keys.iter().map(|s| s.content.width()).sum();
+    let mut hw: usize = hs.iter().map(|s| s.content.width()).sum();
+    if used + hw + kw > area.width as usize {
+        hs.clear();
+        hw = 0;
+    }
+    if used + hw + kw <= area.width as usize {
+        sp.push(Span::raw(" ".repeat(area.width as usize - used - hw - kw)));
+        sp.extend(hs);
+        sp.extend(keys);
     }
     f.render_widget(Paragraph::new(Line::from(sp)), area);
 }

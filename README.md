@@ -33,12 +33,18 @@ the line (`! ✗ already exists`) while you type.
 The finder (`⇥` from the explorer, or its own key) is one prompt. It opens
 on **All**: files and folders from one walk, and while the query is empty the
 Dash rows (pending edits, changes, marked and recent files). A first character
-picks another source and turns into a chip before the query: `/` grep,
+picks another source and stays in front of the query as its sigil: `/` grep,
 `@` projects, `+` git changes, `<` recent (`/fn main` greps for `fn main`).
 None of these start an fzf term, so `'exact`, `^prefix` and `!not` still work.
-`⌫` on an empty query goes back to All; `␣` or `?` there opens a menu of every
-source (`a f d g r s p h`, the same letters as the explorer's `␣` keys), and
-`⇥` jumps to the next group: the next file in grep, the next section in Dash,
+The header is that one line: sigil, query (or a noun saying what to type),
+and on the right the count (`N of M` while filtering), root and non-default
+flags; the Git tab shows the branch there. Pause two seconds on an empty
+prompt and it lists the sigils. The footer names at most two keys for the
+selected row (`⏎ focus workspace · ^t tab`, `⏎ diff · ^a unstage`,
+`^s send 3`) plus `? keys`. `⌫` on an empty query goes back to All; `␣`
+there opens a menu of every source (`a f d g r s p h`, the same letters as
+the explorer's `␣` keys) and `?` one sheet with the sources, every key for
+the current source, the view keys and the query syntax; `⇥` jumps to the next group: the next file in grep, the next section in Dash,
 the next folder elsewhere. The sources:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
 matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
