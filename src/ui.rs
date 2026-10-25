@@ -91,6 +91,8 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
 
     // header: path + pending-change summary (from the real plan)
+    let here = app.here();
+    let results = app.buf().paths.as_ref().map(Vec::len);
     let modified = app.modified_dirs();
     let pending = app.pending_plan();
     let mut tags: HashMap<String, char> = HashMap::new();
@@ -99,7 +101,7 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let (mut gone, mut moved_out): (Vec<String>, Vec<String>) = (vec![], vec![]);
     if let Some(p) = &pending {
         for op in &p.ops {
-            let here = |q: &Path| q.parent() == Some(app.cwd.as_path());
+            let here = |q: &Path| results.is_none() && q.parent() == Some(here.as_path());
             let label = |q: &Path, dir: bool| format!("{}{}", q.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), if dir { "/" } else { "" });
             match op {
                 Op::Delete { src, dir } if here(src) => gone.push(label(src, *dir)),
@@ -175,13 +177,14 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     );
     let branch = app.buf().branch.as_ref().map(|b| format!("\u{e725} {}  ", b.badge())).unwrap_or_default();
     let dirty = if app.buf().modified() { " [+]" } else { "" };
+    let rlabel = results.map(|n| format!("  {n} result file{}", if n == 1 { "" } else { "s" })).unwrap_or_default();
     let sum_w: usize = summary.iter().map(|s| s.content.width()).sum();
-    let budget = (head.width as usize).saturating_sub(3 + sum_w + right.width() + branch.width() + dirty.width() + 1).max(8);
+    let budget = (head.width as usize).saturating_sub(3 + sum_w + right.width() + branch.width() + dirty.width() + rlabel.width() + 1).max(8);
     // path segments, each clickable; leading ones give way to "…/" when narrow
     let mut segs: Vec<(String, std::path::PathBuf)> = Vec::new();
     let home = std::env::var("HOME").ok().filter(|h| !h.is_empty()).map(std::path::PathBuf::from);
     let mut acc = std::path::PathBuf::new();
-    for c in app.cwd.components() {
+    for c in here.components() {
         acc.push(c.as_os_str());
         if home.as_ref().is_some_and(|h| acc.starts_with(h) && acc != *h) || home.as_ref() == Some(&acc) {
             if home.as_ref() == Some(&acc) {
@@ -219,6 +222,7 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
         let st = if last { Style::default().fg(th.text).add_modifier(Modifier::BOLD) } else { Style::default().fg(th.subtext) };
         hs.push(Span::styled(if last && t.len() > 1 { t.trim_end_matches('/').to_string() + "/" } else { t }, st));
     }
+    hs.push(Span::styled(rlabel, Style::default().fg(th.peach).add_modifier(Modifier::BOLD)));
     hs.push(Span::styled(dirty, Style::default().fg(th.yellow).add_modifier(Modifier::BOLD)));
     hs.extend(summary);
     let used: usize = hs.iter().map(|s| s.content.width()).sum();
@@ -311,7 +315,7 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
         let (name_part, link_now) = plan::line_parts(&l.text, entry);
         let name_now = name_part.trim().trim_end_matches('/');
         // change marker, straight from the plan
-        let untouched = entry.is_some_and(|e| e.name == name_now && e.path.parent() == Some(b.dir.as_path()) && link_now.map_or(true, |t| Some(t) == e.link_target.as_deref()));
+        let untouched = entry.is_some_and(|e| plan::normalize(&b.dir.join(name_now)) == e.path && link_now.map_or(true, |t| Some(t) == e.link_target.as_deref()));
         let mut conflict = None;
         let doomed = doomed.contains(&i);
         let (mark, mcol) = if doomed {
@@ -896,8 +900,8 @@ fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
     let rows: &[(&str, &str)] = match cur {
         FinderKind::Projects => &[("⏎", "hop (focus or open its workspace)"), ("^t", "new tab"), ("^o", "explore"), ("^f alt-g", "files / grep inside"), ("^n", "new project from query"), ("^x", "forget"), ("^k ^k", "close its workspace or tab")],
         FinderKind::Git => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("^s", "send")],
-        FinderKind::Grep => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines"), ("alt-t", "tree ⇄ flat"), ("← →", "tree: fold / unfold"), ("^r", "tree folder: search inside")],
-        _ => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines")],
+        FinderKind::Grep => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines"), ("alt-t", "tree ⇄ flat"), ("← →", "tree: fold / unfold"), ("^r", "tree folder: search inside"), ("alt-e", "hit files as one editable listing")],
+        _ => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines"), ("alt-e", "files as one editable listing")],
     };
     let mut view: Vec<(&str, &str)> = vec![("⇥", "next group"), ("^r", "root"), ("alt-h alt-i", "hidden / ignored"), ("alt-p", "preview"), ("esc", "back")];
     if cur == FinderKind::Projects {
@@ -2114,6 +2118,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("Dash", "pending edits, git changes, marked and recent files"),
         ("^o", "reveal in explorer"),
         ("^space", "mark files / grep hits (line kept), ⏎ opens all"),
+        ("alt-e", "the files (marked, else listed) as one listing: edit paths to rename or move, dd deletes, :w"),
         ("^r", "root: cwd ⇄ repository ⇄ parent"),
         ("alt-h alt-i", "toggle hidden · ignored files"),
         ("^y", "copy path"),

@@ -110,6 +110,13 @@ impl Store {
         id
     }
 
+    /// Stat `path` (anywhere) and return its id; None when it is gone.
+    pub fn add(&mut self, path: &Path) -> Option<u64> {
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        std::fs::symlink_metadata(path).ok()?;
+        Some(self.intern(stat_entry(path, name)))
+    }
+
     /// Forget everything (after changes were applied on disk).
     pub fn clear(&mut self) {
         self.entries.clear();

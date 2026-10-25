@@ -196,7 +196,11 @@ pub fn build<'a>(buffers: impl IntoIterator<Item = &'a Buffer>, store: &Store) -
     for b in &bufs {
         for &id in &b.original {
             let Some(e) = store.get(id) else { continue };
-            seen_ids.insert(id);
+            if !seen_ids.insert(id) {
+                // a results buffer and the entry's own folder, both edited
+                plan.errors.push(format!("{}: edited in two listings (a results list and its folder) — save or discard one first", short(&e.path)));
+                continue;
+            }
             let dir = e.kind.is_dir();
             let src = e.path.clone();
             let spots = occ.get(&id).cloned().unwrap_or_default();

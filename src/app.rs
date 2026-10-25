@@ -184,6 +184,17 @@ fn journal_file(cfg: &Config) -> PathBuf {
     cfg.state_dir.join("journal.json")
 }
 
+/// Last component of a results list's key (`root/<RESULTS>`): never a
+/// real name, so the key cannot clash with a folder (and fails any fs call).
+const RESULTS: &str = "\u{0}results";
+
+/// Most finder results `alt-e` turns into one listing.
+const RESULTS_CAP: usize = 5000;
+
+fn is_results(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| n == RESULTS)
+}
+
 fn load_journal(cfg: &Config) -> Vec<Batch> {
     std::fs::read_to_string(journal_file(cfg)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
@@ -409,6 +420,31 @@ impl App {
         app
     }
 
+    /// The folder the cwd listing is in (a results list: its root).
+    pub fn here(&self) -> PathBuf {
+        self.buf().dir.clone()
+    }
+
+    /// `alt-e` in the finder: these files as one editable listing, each
+    /// line its path under `root`. Kept (by its own key) until left
+    /// unedited, like any listing.
+    fn open_results(&mut self, root: PathBuf, files: Vec<PathBuf>) {
+        let key = root.join(RESULTS);
+        let b = Buffer::results(&root, files, &mut self.store);
+        let n = b.paths.as_ref().map_or(0, Vec::len);
+        if self.cwd != key && !is_results(&self.cwd) {
+            self.back.push(self.cwd.clone());
+        }
+        self.buffers.insert(key.clone(), b);
+        self.buffers.retain(|d, b| *d == key || b.modified());
+        self.cwd = key;
+        self.plan_cache = None;
+        self.view = View::Explorer;
+        self.finder_only = false;
+        self.preview_scroll = 0;
+        self.flash(format!("{n} file(s) as one listing — edit paths to rename or move, dd deletes, :w applies"), MsgKind::Info);
+    }
+
     pub fn buf(&self) -> &Buffer {
         &self.buffers[&self.cwd]
     }
@@ -428,6 +464,11 @@ impl App {
     }
 
     pub fn goto(&mut self, dir: &Path, focus: Option<&str>) {
+        // a results list that is no longer loaded: its folder instead
+        if is_results(dir) && !self.buffers.contains_key(dir) {
+            let up = dir.parent().unwrap_or(Path::new("/")).to_path_buf();
+            return self.goto(&up, focus);
+        }
         let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         let (hidden, sort) = (self.hidden, self.sort);
         self.plan_cache = None;
@@ -447,7 +488,7 @@ impl App {
         // Drop unmodified buffers of other dirs to keep things fresh.
         let cwd = dir.clone();
         self.buffers.retain(|d, b| *d == cwd || b.modified());
-        if dir != self.cwd && !self.hist_nav {
+        if dir != self.cwd && !self.hist_nav && !is_results(&self.cwd) {
             self.back.push(self.cwd.clone());
             if self.back.len() > 100 {
                 self.back.remove(0);
@@ -489,7 +530,7 @@ impl App {
     // ── saving ──────────────────────────────────────────────────────────────
 
     fn save(&mut self, then_quit: bool) {
-        let plan = plan::build(self.buffers.values(), &self.store);
+        let plan = plan::build(self.buffers.values().filter(|b| b.modified()), &self.store);
         if !plan.errors.is_empty() {
             self.overlay = if plan.conflicts.is_empty() {
                 Overlay::Report { title: "Cannot save".into(), lines: plan.errors, error: true, scroll: 0 }
@@ -523,7 +564,30 @@ impl App {
         }
         let focus = rep.landed.iter().find(|p| p.parent() == Some(self.cwd.as_path())).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let focus = focus.or_else(|| self.buf().cur().name(&self.store).split('/').next().map(str::to_string));
+        // a results list stays, its files followed to where they went
+        let results = self.buf().paths.clone().map(|mut ps| {
+            for op in &plan.ops {
+                match op {
+                    plan::Op::Move { src, dst, .. } => {
+                        for p in ps.iter_mut() {
+                            if let Ok(r) = p.strip_prefix(src) {
+                                *p = if r.as_os_str().is_empty() { dst.clone() } else { dst.join(r) };
+                            }
+                        }
+                    }
+                    plan::Op::Delete { src, .. } => ps.retain(|p| !p.starts_with(src)),
+                    _ => {}
+                }
+            }
+            (self.here(), ps, self.buf().row)
+        });
         self.reload_all(focus);
+        if let Some((root, ps, row)) = results {
+            self.open_results(root, ps);
+            let b = self.buf_mut();
+            b.row = row;
+            b.clamp();
+        }
         if rep.errors.is_empty() {
             let msg = match (undo, rep.permanent) {
                 (true, _) => format!("undid {} change(s) — U redoes", plan.ops.len()),
@@ -598,7 +662,7 @@ impl App {
         let Some(e) = entry else {
             if line.significant() {
                 // A typed path that already exists? Follow it.
-                let p = plan::normalize(&self.cwd.join(line.text.trim()));
+                let p = plan::normalize(&self.here().join(line.text.trim()));
                 if line.id.is_none() && p.is_dir() {
                     self.goto(&p, None);
                     return;
@@ -630,7 +694,7 @@ impl App {
         }
         // Search from the repository root when there is one: destinations are
         // usually elsewhere in the project. ^r cycles roots as usual.
-        let root = finder::repo_root(&self.cwd).unwrap_or_else(|| self.cwd.clone());
+        let root = finder::repo_root(&self.here()).unwrap_or_else(|| self.here());
         self.finder = Some(Finder::new(FinderKind::Dirs, root, &self.cfg));
         let count = lines.len();
         self.transfer = Some(Transfer { copy, lines, count });
@@ -714,12 +778,14 @@ impl App {
         self.finder_sheet = false;
         if matches!(k, FinderKind::Dash | FinderKind::All) {
             let pending = self.pending_tags();
-            let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, self.cwd.clone(), &self.cfg));
+            let here = self.here();
+            let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, here, &self.cfg));
             f.pending = pending;
         }
+        let here = self.here();
         match &mut self.finder {
-            Some(f) if f.root == self.cwd || f.pre_git.as_ref() == Some(&self.cwd) => f.set_kind(k),
-            _ => self.finder = Some(Finder::new(k, self.cwd.clone(), &self.cfg)),
+            Some(f) if f.root == here || f.pre_git.as_ref() == Some(&here) => f.set_kind(k),
+            _ => self.finder = Some(Finder::new(k, here, &self.cfg)),
         }
         self.view = View::Finder;
         self.preview_scroll = 0;
@@ -936,13 +1002,13 @@ impl App {
             Action::YankPath(kind) => {
                 let p = match self.buf().cur_source_entry(&self.store) {
                     Some(e) => e.path.clone(),
-                    None => self.cwd.clone(),
+                    None => self.here(),
                 };
                 let s = match kind {
                     PathKind::Absolute => p.display().to_string(),
                     PathKind::Name => p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string()),
                     PathKind::Relative => {
-                        let root = finder::repo_root(&self.cwd).unwrap_or_else(|| self.start.clone());
+                        let root = finder::repo_root(&self.here()).unwrap_or_else(|| self.start.clone());
                         match p.strip_prefix(&root) {
                             Ok(r) if !r.as_os_str().is_empty() => r.display().to_string(),
                             _ => p.display().to_string(),
@@ -963,11 +1029,11 @@ impl App {
         match head {
             "cd" | "e" | "edit" => {
                 let target = if rest.is_empty() {
-                    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| self.cwd.clone())
+                    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| self.here())
                 } else if let Some(r) = rest.strip_prefix('~') {
                     PathBuf::from(format!("{}{r}", std::env::var("HOME").unwrap_or_default()))
                 } else {
-                    plan::normalize(&self.cwd.join(rest))
+                    plan::normalize(&self.here().join(rest))
                 };
                 if target.is_dir() {
                     self.goto(&target, None);
@@ -991,7 +1057,7 @@ impl App {
                 }
             }
             "pwd" => {
-                let s = finder::tilde(&self.cwd);
+                let s = finder::tilde(&self.here());
                 self.flash(s, MsgKind::Info);
             }
             "history" => {
@@ -1011,7 +1077,7 @@ impl App {
                 let body = text.join("\n") + "\n";
                 match rest.strip_prefix('>').map(str::trim) {
                     Some(f) if !f.is_empty() => {
-                        let dst = if let Some(r) = f.strip_prefix('~') { PathBuf::from(format!("{}{r}", std::env::var("HOME").unwrap_or_default())) } else { plan::normalize(&self.cwd.join(f)) };
+                        let dst = if let Some(r) = f.strip_prefix('~') { PathBuf::from(format!("{}{r}", std::env::var("HOME").unwrap_or_default())) } else { plan::normalize(&self.here().join(f)) };
                         if std::fs::symlink_metadata(&dst).is_ok() {
                             self.flash(format!("{} exists — not overwritten", finder::tilde(&dst)), MsgKind::Err);
                         } else {
@@ -1326,6 +1392,9 @@ impl App {
     /// Count `dir`'s hits if not done yet, and hide its rows without any
     /// once they are in (under `zm`).
     fn content_sync(&mut self, dir: &Path) {
+        if is_results(dir) {
+            return;
+        }
         let hidden = self.hidden;
         if let Some(c) = self.content.as_mut() {
             c.request(dir, hidden);
@@ -1357,7 +1426,7 @@ impl App {
 
     /// Ask the background worker for `dir`'s git status (badges, branch).
     pub fn request_git(&mut self, dir: &Path) {
-        if !self.cfg.git_status {
+        if !self.cfg.git_status || is_results(dir) {
             return;
         }
         if self.git_tx.is_none() {
@@ -1429,7 +1498,7 @@ impl App {
                 return Some(p.clone());
             }
         }
-        let p = std::rc::Rc::new(plan::build(self.buffers.values(), &self.store));
+        let p = std::rc::Rc::new(plan::build(self.buffers.values().filter(|b| b.modified()), &self.store));
         self.plan_cache = Some((key, p.clone()));
         Some(p)
     }
@@ -1531,12 +1600,13 @@ impl App {
     }
 
     fn archive(&mut self, name: &str, tar: bool, ids: &[u64]) {
-        let entries: Vec<PathBuf> = ids.iter().filter_map(|id| self.store.get(*id)).filter(|e| e.path.parent() == Some(self.cwd.as_path())).map(|e| e.path.clone()).collect();
+        let here = self.here();
+        let entries: Vec<PathBuf> = ids.iter().filter_map(|id| self.store.get(*id)).filter(|e| e.path.parent() == Some(here.as_path())).map(|e| e.path.clone()).collect();
         if entries.is_empty() {
             self.flash("no saved entries of this folder on these lines", MsgKind::Warn);
             return;
         }
-        match create_archive(&self.cwd, name, tar, &entries) {
+        match create_archive(&here, name, tar, &entries) {
             Ok(p) => {
                 if !self.buf().modified() {
                     self.reload_cwd();
@@ -1595,7 +1665,7 @@ impl App {
 
     /// Buffer lines whose destination clashes (dir, row, key, reason).
     fn conflict_lines(&self) -> Vec<(PathBuf, usize, String, String)> {
-        let plan = plan::build(self.buffers.values(), &self.store);
+        let plan = plan::build(self.buffers.values().filter(|b| b.modified()), &self.store);
         let mut dirs: Vec<&PathBuf> = self.buffers.keys().collect();
         dirs.sort();
         let mut out = Vec::new();
@@ -1626,7 +1696,7 @@ impl App {
         if lines.is_empty() {
             return;
         }
-        let plan = plan::build(self.buffers.values(), &self.store);
+        let plan = plan::build(self.buffers.values().filter(|b| b.modified()), &self.store);
         let mut taken: HashSet<String> = plan.ops.iter().filter_map(|o| o.dst()).map(plan::key).collect();
         let mut first_kept: HashSet<String> = HashSet::new();
         let mut snapped: HashSet<PathBuf> = HashSet::new();
@@ -2007,6 +2077,30 @@ impl App {
             (KeyCode::Char('t'), true, _) => open_how = Some(OpenTarget::Tab),
             (KeyCode::Char('e'), true, _) => open_how = Some(OpenTarget::Popup),
             (KeyCode::Char('g'), true, _) => open_how = Some(OpenTarget::System),
+            (KeyCode::Char('e'), _, true) if f.kind != FinderKind::Projects => {
+                // the marked files, else every listed one, as one editable listing
+                let root = f.root.clone();
+                let mut files: Vec<PathBuf> = if f.marked.is_empty() {
+                    let n = f.len().min(RESULTS_CAP);
+                    f.items(0, n).into_iter().filter(|it| !it.is_dir).map(|it| it.abs).collect()
+                } else {
+                    f.marked.iter().map(|m| m.path.clone()).collect()
+                };
+                files.sort();
+                files.dedup();
+                let all = files.len();
+                files.retain(|p| p.starts_with(&root));
+                if files.is_empty() {
+                    self.flash("no files to edit here", MsgKind::Warn);
+                    return;
+                }
+                let capped = f.len() > RESULTS_CAP && f.marked.is_empty();
+                self.open_results(root, files);
+                if all > self.buf().lines.len() || capped {
+                    self.flash(format!("{} file(s) as one listing (first {RESULTS_CAP} results; files outside the root left out)", self.buf().lines.len()), MsgKind::Warn);
+                }
+                return;
+            }
             (KeyCode::Char('t'), _, true) if f.kind == FinderKind::Grep => {
                 f.toggle_tree();
                 self.preview_scroll = 0;
@@ -2064,10 +2158,11 @@ impl App {
                 }
             }
             (KeyCode::Char('r'), true, _) => {
-                let repo = finder::repo_root(&self.cwd);
+                let here = self.buffers.get(&self.cwd).map(|b| b.dir.clone()).unwrap_or_else(|| self.cwd.clone());
+                let repo = finder::repo_root(&here);
                 let target = match repo {
                     Some(r) if r != f.root => r,
-                    _ if f.root != self.cwd => self.cwd.clone(),
+                    _ if f.root != here => here,
                     _ => f.root.parent().map(Path::to_path_buf).unwrap_or_else(|| f.root.clone()),
                 };
                 f.set_root(target);
@@ -2532,7 +2627,7 @@ impl App {
         use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
         let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
-        let status = std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(&self.cwd).status();
+        let status = std::process::Command::new(&argv[0]).args(&argv[1..]).current_dir(self.here()).status();
         *terminal = ratatui::init();
         let _ = crossterm::execute!(std::io::stdout(), EnableMouseCapture);
         let _ = terminal.clear();
@@ -2707,6 +2802,72 @@ mod tests {
         typed(&mut app, "g/");
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.content.is_none());
+    }
+
+    #[test]
+    fn results_become_one_editable_listing() {
+        let (t, mut app) = app_in("app-results-edit");
+        std::fs::write(t.0.join("src/deep/needle.rs"), "hay").unwrap();
+        std::fs::write(t.0.join("a.txt"), "hay").unwrap();
+        std::fs::write(t.0.join("b.txt"), "straw").unwrap();
+        let key = |app: &mut App, c: KeyCode, m: KeyModifiers| app.key(KeyEvent::new(c, m));
+        // grep, then alt-e: the hit files, one line each, relative to the root
+        app.act(Action::Finder(FinderKind::Grep));
+        for c in "hay".chars() {
+            key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        while (app.finder.as_ref().unwrap().hits() < 2 || app.finder.as_ref().unwrap().walking()) && t0.elapsed() < Duration::from_secs(5) {
+            app.finder.as_mut().unwrap().tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.finder.as_mut().unwrap().tree = false;
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::ALT);
+        assert_eq!(app.view, View::Explorer);
+        let texts = |app: &App| app.buf().lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&app), ["a.txt", "src/deep/needle.rs"]);
+        let text = screen(&mut app, 100, 16).join("\n");
+        assert!(text.contains("2 result files"), "{text}");
+        // ⏎ on a nested line opens it (it is an unedited entry)
+        assert!(app.buf().cur_entry(&app.store).is_some());
+        // move the nested file up a level and rename it, delete a.txt
+        let b = app.buf_mut();
+        b.snapshot();
+        b.lines[1].text = "src/found.rs".into();
+        b.lines.remove(0);
+        app.plan_cache = None;
+        let plan = plan::build(app.buffers.values().filter(|b| b.modified()), &app.store);
+        assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+        assert_eq!(plan.ops.len(), 2, "{:?}", plan.ops);
+        app.execute(plan, false, false);
+        assert!(t.0.join("src/found.rs").exists() && !t.0.join("src/deep/needle.rs").exists());
+        assert!(!t.0.join("a.txt").exists() && t.0.join("b.txt").exists());
+        // the list stays, following the moved file
+        assert_eq!(texts(&app), ["src/found.rs"]);
+        assert!(!app.buf().modified());
+        // - leaves for the root's own listing
+        app.act(Action::Parent);
+        assert_eq!(app.cwd, std::fs::canonicalize(&t.0).unwrap());
+        assert!(app.buf().paths.is_none());
+    }
+
+    #[test]
+    fn a_file_edited_in_two_listings_is_refused() {
+        let (t, mut app) = app_in("app-results-twice");
+        app.open_results(t.0.clone(), vec![t.0.join("a.txt")]);
+        let b = app.buf_mut();
+        b.snapshot();
+        b.lines[0].text = "x.txt".into();
+        let key = app.cwd.clone();
+        app.goto(&t.0, None);
+        let b = app.buf_mut();
+        b.snapshot();
+        let i = b.lines.iter().position(|l| l.text == "a.txt").unwrap();
+        b.lines[i].text = "y.txt".into();
+        assert!(app.buffers.contains_key(&key), "the edited results list is kept");
+        let plan = plan::build(app.buffers.values().filter(|b| b.modified()), &app.store);
+        assert!(plan.errors.iter().any(|e| e.contains("edited in two listings")), "{:?}", plan.errors);
     }
 
     fn screen(app: &mut App, w: u16, h: u16) -> Vec<String> {

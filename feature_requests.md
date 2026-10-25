@@ -8,10 +8,7 @@ Items marked **Review note** were checked against the code; the note records cor
 
 ## 1. Finder
 
-1. **Live Grep / Finder → Editable Buffer ("Quickfix / Oil-Grep" Mode)** — ⏸ deferred
-   - **Current state:** In `Finder` (`src/finder.rs`), `^space` marks multiple files or grep hits, marks keep line numbers, `^s` sends them, and `^o` reveals a single file in the explorer.
-   - **Suggestion:** Add a binding in Finder (e.g., `^q` or `alt-e`) that loads the unique files from the current Finder/Grep results (or `marked` files) into a virtual multi-directory Oil buffer where each line displays `rel/path/to/file.rs`. Because `Store` (`src/entry.rs`) and `plan::build` (`src/plan.rs`) already track full `PathBuf`s per entry ID, users can batch-rename, move, or delete files across the entire repository from a fuzzy query or ripgrep search.
-   - **Review note:** Large. `Buffer` is built around one directory (`b.dir`): line text is a name relative to it, and `plan::build` joins it to `b.dir`. A multi-directory buffer needs a new line/path model throughout `buffer.rs`, `plan.rs`, and `draw_explorer`. Defer.
+1. **Editable results: line edits** — the file part is in (`alt-e` in the finder lists the files as one editable listing, paths relative to the root; `:w` keeps the list, following moved files). Still open:
    - **Extension: editable hit lines.** In the grep tree (`alt-t`), `alt-e` makes the hit lines editable as well: editing a hit line rewrites that line in its file, editing a file row renames the file, `dd` on a file row deletes it, and `:s`, visual mode, counters and dot-repeat work across all hits. Folder rows, line numbers and indentation stay read-only. `dd` on a hit row resets that line; it does not delete the line from the file. The preview shows the selected file's pending diff. Prior art: wgrep, quickfix-reflector, grug-far.
    - **Extension: one review for line edits and file ops.** Add `Op::Patch { path, line, before, after }` to `plan.rs`. The `:w` dialog lists patches next to renames and deletes. `apply.rs` writes each file's patches once, through a temp file, before any `move_path`, so every path is still where rg found it. A patch whose line no longer reads `before` is skipped and reported. The dialog also warns when a rename would break a symlink and offers `Op::Retarget`. Binary files and lines too long for the pane are listed but stay read-only.
 
@@ -27,5 +24,6 @@ Items marked **Review note** were checked against the code; the note records cor
    - **Decided:** A row whose edit stops matching the query stays visible until `:w`.
    - **Decided:** The preview heading keeps its diff overview in every state: git letter, name, size and age on the left, `+N −M` and the bar on the right (`draw_preview_head`), with the diff in the body. For pending line edits the heading uses the same `+N −M` and bar, counted against the file on disk.
    - **Open question:** After `:w`, should the popup return to the listing or stay on the results?
-   - **Build order:** (1) the listing on the empty prompt and the two focus states, with results read-only and `⏎` on a result opening its folder in the listing; (2) multi-folder editing (item 1), then `Op::Patch`.
+   - **Build order:** (1) the listing on the empty prompt and the two focus states, with results read-only and `⏎` on a result opening its folder in the listing; (2) rows editable under a query (the `alt-e` results list from item 1 shown in place of the results), then `Op::Patch`.
+   - **Tried and reverted:** step 1 shipped in 944ed26 and was reverted; the old keys (esc closes, `/` searches names, `⇥` opens the All panel with the Dash rows) were preferred.
    - **Mockup:** walkthrough of seven states plus a key table (claude.ai artifact "Oil One Popup").

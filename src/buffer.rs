@@ -55,6 +55,9 @@ pub struct Buffer {
     pub only_changed: bool,
     /// `zm` under a content filter: list only these names.
     pub keep: Option<std::collections::HashSet<String>>,
+    /// A results buffer (`alt-e` in the finder): these files, anywhere
+    /// under `dir`, each listed as its path relative to `dir`.
+    pub paths: Option<Vec<PathBuf>>,
     pub error: Option<String>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
@@ -83,6 +86,7 @@ impl Buffer {
             branch: None,
             only_changed: false,
             keep: None,
+            paths: None,
             error: None,
             undo: vec![],
             redo: vec![],
@@ -92,17 +96,37 @@ impl Buffer {
         b
     }
 
-    /// Re-read the directory, discarding edits. Keeps the cursor on the same
-    /// name when it still exists.
+    /// A results buffer listing `paths` (files under `dir`, sorted).
+    pub fn results(dir: &Path, mut paths: Vec<PathBuf>, store: &mut Store) -> Buffer {
+        paths.sort_by(|a, b| crate::entry::natural_cmp(&a.to_string_lossy(), &b.to_string_lossy()));
+        paths.dedup();
+        let mut b = Buffer::load(dir, store, false, Sort::Name, false);
+        b.paths = Some(paths);
+        b.reload(store, false, Sort::Name, false);
+        b
+    }
+
+    /// The line text for an entry: its name here, or for a results buffer
+    /// its path relative to `dir`.
+    fn text_of(&self, e: &Entry) -> String {
+        match e.path.parent().filter(|_| self.paths.is_some()).and_then(|p| p.strip_prefix(&self.dir).ok()) {
+            Some(rel) if !rel.as_os_str().is_empty() => format!("{}/{}", rel.display(), e.display()),
+            _ => e.display(),
+        }
+    }
+
+    /// Re-read the directory (a results buffer: its files), discarding
+    /// edits. Keeps the cursor on the same name when it still exists.
     pub fn reload(&mut self, store: &mut Store, hidden: bool, sort: Sort, git: bool) {
         let keep = self.lines.get(self.row).map(|l| l.text.clone());
-        match store.list(&self.dir, hidden, sort) {
+        let listed = match &self.paths {
+            Some(ps) => Ok(ps.iter().filter_map(|p| store.add(p)).collect()),
+            None => store.list(&self.dir, hidden, sort),
+        };
+        match listed {
             Ok(ids) => {
                 self.error = None;
-                self.lines = ids
-                    .iter()
-                    .map(|&id| Line { id: Some(id), text: store.get(id).map(Entry::display).unwrap_or_default() })
-                    .collect();
+                self.lines = ids.iter().map(|&id| Line { id: Some(id), text: store.get(id).map(|e| self.text_of(e)).unwrap_or_default() }).collect();
                 self.original = ids;
             }
             Err(e) => {
@@ -146,7 +170,7 @@ impl Buffer {
     /// Re-sort lines in place without touching edits (only when unmodified
     /// would be simpler, but keeping edits is friendlier).
     pub fn resort(&mut self, store: &Store, sort: Sort) {
-        if self.modified() {
+        if self.modified() || self.paths.is_some() {
             return;
         }
         let mut es: Vec<Entry> = self.original.iter().filter_map(|id| store.get(*id).cloned()).collect();
@@ -277,7 +301,7 @@ impl Buffer {
     pub fn cur_entry<'a>(&self, store: &'a Store) -> Option<&'a Entry> {
         let l = self.cur();
         let e = store.get(l.id?)?;
-        (l.name(store) == e.name).then_some(e)
+        (crate::plan::normalize(&self.dir.join(l.name(store))) == e.path).then_some(e)
     }
 
     // ── text primitives (char indices) ──────────────────────────────────────
@@ -351,6 +375,7 @@ mod tests {
             branch: None,
             only_changed: false,
             keep: None,
+            paths: None,
             error: None,
             undo: vec![],
             redo: vec![],

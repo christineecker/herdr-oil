@@ -234,6 +234,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `foo -- *.rs -t py -T md` | grep: limit to globs / ripgrep file types |
 | `^s` | send the selection (or marked files, grep hits with `:line`) to the origin pane |
 | `alt-s` | send the grep lines themselves (`path:line: text`) to an agent |
+| `alt-e` | the files (marked, else every listed one) as one editable listing, each line its path under the root: edit a path to rename or move, `dd` deletes, `:s` works across them, `:w` reviews and applies, and the list follows the files it moved; `-` leaves it |
 | grep: `alt-t` · `←` `→` | hits flat ⇄ as a tree (remembered) · fold · unfold |
 | grep tree, folder row: `^r` `^o` | search again inside it · open it in the explorer |
 | Git tab: `⏎` `^a` `alt-d` | diff view of every change · stage ⇄ unstage · discard (asks) |
