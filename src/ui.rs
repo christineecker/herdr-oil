@@ -88,6 +88,7 @@ fn split_preview(area: Rect, on: bool) -> (Rect, Option<Rect>) {
 
 fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let th = app.th.clone();
+    let area = draw_listing_prompt(f, app, area);
     let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
 
     // header: path + pending-change summary (from the real plan)
@@ -899,7 +900,7 @@ fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
         FinderKind::Grep => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines"), ("alt-t", "tree ⇄ flat"), ("← →", "tree: fold / unfold"), ("^r", "tree folder: search inside")],
         _ => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines")],
     };
-    let mut view: Vec<(&str, &str)> = vec![("⇥", "next group"), ("^r", "root"), ("alt-h alt-i", "hidden / ignored"), ("alt-p", "preview"), ("esc", "back")];
+    let mut view: Vec<(&str, &str)> = vec![("esc ⇥", "prompt ⇄ list"), ("] [", "list: next / previous group"), ("^r", "root"), ("alt-h alt-i", "hidden / ignored"), ("alt-p", "preview"), ("list: ⏎", "open its folder here"), ("list: esc q", "clear · close")];
     if cur == FinderKind::Projects {
         view.insert(0, ("^a", "scope: all → open → dirty → recent"));
     }
@@ -996,6 +997,47 @@ fn clip(s: &str, w: usize, tail: bool) -> String {
     } else {
         format!("{out}…")
     }
+}
+
+/// The sources row: each source by sigil and name (All is `› files`),
+/// `cur` in its colour and the others dim, as many as fit in `room`.
+fn source_tabs(th: &Theme, lead: FinderKind, cur: Option<FinderKind>, room: usize) -> Vec<Span<'static>> {
+    let mut out = vec![];
+    for k in [lead, FinderKind::Grep, FinderKind::Git, FinderKind::Recent, FinderKind::Projects] {
+        let st = if Some(k) == cur { Style::default().fg(kind_color(th, k)).add_modifier(Modifier::BOLD) } else { Style::default().fg(th.dim) };
+        let name = if k == FinderKind::All { "files".to_string() } else { k.label().to_lowercase() };
+        let t = [Span::styled(format!("{} {name}", k.sigil().unwrap_or('›')), st), Span::raw("   ")];
+        if 1 + spans_w(&out) + spans_w(&t) > room {
+            break;
+        }
+        out.extend(t);
+    }
+    out
+}
+
+/// The popup's top over the listing: the sources row and the empty
+/// prompt (focused in INSERT), then what is left for the listing.
+fn draw_listing_prompt(f: &mut Frame, app: &App, area: Rect) -> Rect {
+    let th = &app.th;
+    let roomy = area.height >= 12;
+    let gap = Constraint::Length(roomy as u16);
+    let [bar, _, prompt, _, rest] = Layout::vertical([gap, gap, Constraint::Length(1), gap, Constraint::Min(1)]).areas(area);
+    if roomy {
+        let mut left = vec![Span::raw(" ")];
+        left.extend(source_tabs(th, FinderKind::All, Some(FinderKind::All), bar.width as usize));
+        f.render_widget(Paragraph::new(Line::from(left)), bar);
+    }
+    let idle = app.last_key.elapsed() >= std::time::Duration::from_secs(2);
+    let hint = if app.prompt || idle { "files & folders · or start with / + < @ to switch" } else { "files & folders" };
+    let lead = vec![Span::raw(" "), Span::styled("› ", Style::default().fg(kind_color(th, FinderKind::All)).add_modifier(Modifier::BOLD))];
+    let lw = spans_w(&lead);
+    let mut ps = lead;
+    ps.push(Span::styled(clip(hint, (prompt.width as usize).saturating_sub(lw + 1), false), Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
+    f.render_widget(Paragraph::new(Line::from(ps)), prompt);
+    if app.prompt && matches!(app.overlay, Overlay::None) {
+        f.set_cursor_position(Position::new(prompt.x + lw as u16, prompt.y));
+    }
+    rest
 }
 
 /// List panel heading.
@@ -1110,21 +1152,9 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         right.push(Span::styled(trunc, Style::default().fg(th.peach)));
         right.push(Span::raw(" "));
         let lead = if matches!(fd.kind, FinderKind::Files | FinderKind::Dirs | FinderKind::Dash) { fd.kind } else { FinderKind::All };
-        let tabs: Vec<Vec<Span<'static>>> = [lead, FinderKind::Grep, FinderKind::Git, FinderKind::Recent, FinderKind::Projects]
-            .into_iter()
-            .map(|k| {
-                // the current source in its colour, the others dim
-                let st = if k == fd.kind && transfer.is_none() { Style::default().fg(kind_color(&th, k)).add_modifier(Modifier::BOLD) } else { dim };
-                vec![Span::styled(format!("{} {}", k.sigil().unwrap_or('›'), k.label().to_lowercase()), st), Span::raw("   ")]
-            })
-            .collect();
+        let cur = transfer.is_none().then_some(fd.kind);
         let rw = spans_w(&right);
-        for t in tabs {
-            if spans_w(&left) + spans_w(&t) + rw > width {
-                break;
-            }
-            left.extend(t);
-        }
+        left.extend(source_tabs(&th, lead, cur, width.saturating_sub(rw + 1)));
         f.render_widget(Paragraph::new(spread(left, right, width)), bar);
     }
 
@@ -1182,7 +1212,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     ps.extend(right);
     f.render_widget(Paragraph::new(Line::from(ps)), prompt);
     let qx: usize = fd.query.chars().take(fd.qcur).map(|c| c.to_string().width()).sum();
-    if matches!(app.overlay, Overlay::None) {
+    if matches!(app.overlay, Overlay::None) && !app.finder_list {
         f.set_cursor_position(Position::new(prompt.x + lead_w as u16 + qx as u16, prompt.y));
     }
 
@@ -1598,7 +1628,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let (label, bg) = match (app.view, &app.vim.mode) {
         (View::Viewer, _) => (" VIEW ", th.teal),
-        (_, Mode::Normal) => (" OIL ", th.accent),
+        (_, Mode::Normal) if app.prompt => (" INSERT ", th.green),
+        (_, Mode::Normal) => (" NORMAL ", th.accent),
         (_, Mode::Insert) => (" INSERT ", th.green),
         (_, Mode::Visual { .. }) => (" V-LINE ", th.peach),
         (_, Mode::Cmd { .. }) => (" CMD ", th.yellow),
@@ -1620,11 +1651,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let hints: &[(&str, &str)] = match (app.view, &app.vim.mode) {
         (View::Viewer, _) if app.viewer.as_ref().is_some_and(|v| v.diff) => &[("]c [c", "hunk"), ("⇥", "file"), ("s", "split"), ("w", "whitespace"), ("z", "expand"), ("v", "viewed"), ("c", "compare"), ("⏎", "open at line"), ("q", "back")],
         (View::Viewer, _) => &[("j/k ␣ b", "scroll"), ("/ n N", "search"), ("d", "diff"), ("L", "log"), ("e", "edit here"), ("p", "send"), ("q", "back")],
+        (_, Mode::Normal) if app.prompt => &[("type", "find"), ("/ + < @", "grep · changes · recent · projects"), ("↑↓ ⏎", "move · open"), ("esc", "list")],
         (_, Mode::Insert) => &[("esc", "normal"), ("⏎", "new line"), ("^s", "save")],
         (_, Mode::Visual { .. }) => &[("d", "cut"), ("y", "yank"), ("c", "change"), ("I A", "prefix/suffix"), (":", "s/…/…/"), ("esc", "cancel")],
-        _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "find"), ("g?", "help"), ("esc", "close")],
-        _ if app.vim.reg_entries() > 0 => &[("⏎", "open"), ("p", "paste"), ("gm", "move yanked to…"), ("gc", "copy yanked to…"), (":w", "apply"), ("g?", "help"), ("esc", "close")],
-        _ => &[("⏎", "open"), ("-", "up"), ("H L", "back/fwd"), (":w", "apply"), ("⇥", "find"), ("␣/", "grep"), ("g?", "help"), ("esc", "close")],
+        _ if app.vim.reg_entries() > 0 && app.vim.reg_cut => &[("⏎", "open"), ("p", "paste"), ("gm", "move cut to…"), (":w", "apply"), ("⇥", "prompt"), ("g?", "help"), ("q", "close")],
+        _ if app.vim.reg_entries() > 0 => &[("⏎", "open"), ("p", "paste"), ("gm", "move yanked to…"), ("gc", "copy yanked to…"), (":w", "apply"), ("g?", "help"), ("q", "close")],
+        _ => &[("⏎", "open"), ("-", "up"), ("H L", "back/fwd"), (":w", "apply"), ("⇥", "prompt"), ("/", "grep"), ("g?", "help"), ("q", "close")],
     };
     let mut hs = Vec::new();
     for (k, v) in hints {
@@ -1640,11 +1672,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(sp)), area);
 }
 
-/// Finder footer: the FIND badge, a message (else the position and marks)
-/// on the left, the selected row's verbs, `esc back` and `? keys` on the right.
+/// Finder footer: the focus badge (INSERT on the prompt, NORMAL on the
+/// results), a message (else the position and marks) on the left, the
+/// selected row's verbs, what esc does and `? keys` on the right.
 fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.th;
-    let mut sp = vec![Span::styled(" FIND ", Style::default().fg(Color::Black).bg(th.blue).add_modifier(Modifier::BOLD)), Span::raw(" ")];
+    let (badge, bg) = if app.finder_list { (" NORMAL ", th.accent) } else { (" INSERT ", th.green) };
+    let mut sp = vec![Span::styled(badge, Style::default().fg(Color::Black).bg(bg).add_modifier(Modifier::BOLD)), Span::raw(" ")];
     if let Some((m, k, _)) = &app.msg {
         let c = match k {
             MsgKind::Info => th.subtext,
@@ -1670,7 +1704,7 @@ fn draw_finder_status(f: &mut Frame, app: &App, area: Rect) {
     }
     let keys = [
         Span::styled("    esc ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
-        Span::styled("back  ", Style::default().fg(th.dim)),
+        Span::styled(if app.finder_list { "clear  " } else { "list  " }, Style::default().fg(th.dim)),
         Span::styled("? ", Style::default().fg(th.accent).add_modifier(Modifier::BOLD)),
         Span::styled("keys ", Style::default().fg(th.dim)),
     ];
@@ -2025,7 +2059,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("^p", "toggle preview (^f/^b scroll it)"),
         ("^l  :e!", "refresh · discard edits here"),
         ("g?  then /", "this help · type to filter it"),
-        ("q  esc  ZZ  ZQ", "quit (asks if unsaved) · apply+quit · discard+quit"),
+        ("q  ZZ  ZQ", "quit (asks if unsaved) · apply+quit · discard+quit"),
+        ("⇥  / + < @", "focus the prompt · with that source typed"),
     ]),
     ("Git", &[
         ("]g [g  ]c [c", "next · previous changed entry"),
@@ -2090,7 +2125,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         (":cd path ⇥", "jump, ⇥ completes paths, commands and arguments"),
         ("↑ ↓  ^p ^n", "in : and / — history (matching what is typed)"),
         ("^a ^e ^w ^u ^k  alt-b alt-f", "line editing in : / and the finder"),
-        ("/pat  :noh", "search lines (matches highlighted) · clear"),
+        ("?pat  :noh", "search names (matches highlighted) · clear"),
         (":sort mtime  :sort!", "sort name|mtime|size|ext · reverse"),
     ]),
     ("Vim motions", &[
@@ -2098,16 +2133,18 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("gg G {n}G", "first / last / nth line"),
         ("f F t T ; ,", "find char · repeat · reverse"),
         ("i a I A s S C D x r ~ J", "the usual"),
-        ("/pattern n N", "search lines"),
+        ("?pattern n N", "search lines"),
     ]),
-    ("Finder (⇥ or ␣␣ all · ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git · ␣p projects · ␣h dash)", &[
+    ("Finder: the prompt over the listing (⇥ or ␣␣ all · ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git · ␣p projects · ␣h dash)", &[
         ("type", "fuzzy query ('exact ^prefix suffix$ !not)"),
         ("/ + < @  typed first", "switch to grep · changes · recent · projects (from All or Files)"),
-        ("empty query in All", "pending edits, git changes, marked and recent files"),
+        ("empty prompt", "the listing of this folder (␣h: pending, changes, marks, recent)"),
+        ("esc  ⇥", "prompt (INSERT) ⇄ list (NORMAL)"),
+        ("list: ⏎  esc  q", "open the row's folder in the listing · clear · close"),
         ("␣ or ? on empty", "pick a source: a f d g r s p h"),
-        ("⌫ on empty", "back to All, then to the explorer"),
+        ("⌫ on empty", "back to All, then to the listing"),
         ("foo -- *.rs  -t py", "grep: only these globs / file types"),
-        ("⇥ ⇧⇥", "next · previous group (grep: file · dash: section · else folder)"),
+        ("list: ] [", "next · previous group (grep: file · dash: section · else folder)"),
         ("^s  alt-s", "send selection / marked paths · their grep lines as text"),
         ("⏎ ^v ^x ^t ^e", "open (default · split · below · tab · popup)"),
         ("Git: ⏎ ^a alt-d", "diff view of all changes · stage ⇄ unstage · discard"),
