@@ -144,6 +144,12 @@ pub enum Action {
     GitFilter,
     /// `gw`: parent-folder column.
     ToggleParent,
+    /// `g/pattern`: count hits per entry (an empty pattern ends the filter).
+    ContentFilter(String),
+    /// `zm` / `zr`: hide / show again the rows without hits.
+    HitsOnly(bool),
+    /// `n` / `N` after `g/`: the next / previous row with hits.
+    NextHit(bool),
 }
 
 /// What `gy` / `gY` / `gn` copy.
@@ -159,6 +165,8 @@ pub struct Vim {
     pending: Vec<char>,
     pub reg: Option<Reg>,
     pub search: String,
+    /// `n` `N` follow the content filter's hits (`g/` was the last search).
+    content_nav: bool,
     search_char: Option<(char, char)>,
     /// The line register came from a cut (dd) rather than a yank (yy).
     pub reg_cut: bool,
@@ -327,6 +335,7 @@ impl Default for Vim {
             pending: vec![],
             reg: None,
             search: String::new(),
+            content_nav: false,
             search_char: None,
             reg_cut: false,
             msg: None,
@@ -539,11 +548,16 @@ impl Vim {
                 self.mode = Mode::Normal;
                 self.unpreview(b);
                 if !text.trim().is_empty() {
-                    self.remember(kind, if kind == '/' { &text } else { text.trim() });
+                    self.remember(kind, if kind == ':' { text.trim() } else { &text });
+                }
+                if kind == 'g' {
+                    self.content_nav = !text.trim().is_empty();
+                    return Action::ContentFilter(text.trim().to_string());
                 }
                 if kind == '/' {
                     if !text.is_empty() {
                         self.search = text;
+                        self.content_nav = false;
                     }
                     return Action::None;
                 }
@@ -1209,7 +1223,7 @@ impl Vim {
                         }
                     }
                     'f' => *act = Action::Finder(FinderKind::Files),
-                    '/' => *act = Action::Finder(FinderKind::Grep),
+                    '/' => self.mode = Mode::Cmd { kind: 'g', text: String::new(), cur: 0, origin: (b.row, b.col) },
                     'D' => *act = Action::DiffView,
                     'l' => *act = Action::Log,
                     'G' => *act = Action::GitFilter,
@@ -1295,6 +1309,19 @@ impl Vim {
             }
             '/' | '?' => {
                 self.mode = Mode::Cmd { kind: '/', text: String::new(), cur: 0, origin: (b.row, b.col) };
+                Parse::Done
+            }
+            'n' | 'N' if self.content_nav => {
+                *act = Action::NextHit(c == 'n');
+                Parse::Done
+            }
+            'z' => {
+                let Some(&d) = keys.get(i) else { return Parse::More };
+                *act = match d {
+                    'm' => Action::HitsOnly(true),
+                    'r' => Action::HitsOnly(false),
+                    _ => return Parse::Bad,
+                };
                 Parse::Done
             }
             'n' | 'N' => {

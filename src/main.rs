@@ -11,6 +11,7 @@ mod archive;
 mod apply;
 mod buffer;
 mod config;
+mod content;
 mod diff;
 mod diffview;
 mod entry;

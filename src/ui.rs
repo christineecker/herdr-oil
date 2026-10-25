@@ -157,8 +157,12 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
             summary.push(Span::styled("  :w", Style::default().fg(th.accent)));
         }
     }
+    let filter = match &app.content {
+        Some(c) => format!(" · g/{}{}", c.query, if c.only { " (hits only)" } else { "" }),
+        None => String::new(),
+    };
     let right = format!(
-        "{}{}{}{}{} ",
+        "{}{}{}{}{}{filter} ",
         app.sort.label(),
         if app.store.reverse { " ↕" } else { "" },
         if app.hidden { " · hidden" } else { "" },
@@ -277,6 +281,8 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     let (details, icons) = (app.details, app.cfg.icons);
     let cwd = app.cwd.clone();
     let store = &app.store;
+    // g/: hits per entry name (None: no filter, or still counting)
+    let hits = app.content.as_ref().and_then(|c| c.counts(&cwd));
     let b = app.buffers.get_mut(&cwd).unwrap();
     b.view_h = list_inner.height as usize;
     b.follow();
@@ -361,7 +367,8 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
             Kind::File if name_now.starts_with('.') => Style::default().fg(th.subtext),
             Kind::File => Style::default().fg(th.text),
         };
-        let base = if gitc.is_some_and(|g| g.letter == '!') { base.add_modifier(Modifier::DIM) } else { base };
+        let nhits = hits.filter(|_| l.significant()).map(|m| m.get(name_now).copied().unwrap_or(0));
+        let base = if gitc.is_some_and(|g| g.letter == '!') || nhits == Some(0) { base.add_modifier(Modifier::DIM) } else { base };
         // virtual text: where a renamed / moved / copied line came from, a
         // symlink's target, and the details column on the right
         let mut after = Vec::new();
@@ -398,6 +405,9 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
             } else if details == 1 && w > 30 {
                 tail.push(Span::styled(format!("  {size:>9}"), Style::default().fg(scol)));
             }
+        }
+        if let Some(n) = nhits.filter(|&n| n > 0) {
+            tail.push(Span::styled(format!("  {n:>4}"), Style::default().fg(th.yellow)));
         }
         let avail = w.saturating_sub(used + 1).max(4);
         let chars: Vec<char> = l.text.chars().collect();
@@ -505,7 +515,15 @@ fn draw_explorer(f: &mut Frame, app: &mut App, area: Rect) {
     if let Some(pr) = prev {
         // the entry a line came from, even while it is being renamed
         let target = b.cur_source_entry(store).map(|e| e.path.clone());
-        draw_preview(f, app, pr, target.as_deref(), None, Show::File);
+        // a folder under g/: its hits, by file
+        let show = match &app.content {
+            Some(c) if target.as_ref().is_some_and(|t| t.is_dir()) => {
+                app.preview.grep = c.query.clone();
+                Show::Hits
+            }
+            _ => Show::File,
+        };
+        draw_preview(f, app, pr, target.as_deref(), None, show);
     }
 }
 
@@ -1556,10 +1574,13 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         _ => None,
     };
     if let Some((kind, text, cur)) = typing {
-        let mut sp = vec![Span::styled(kind.to_string(), Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(text.clone(), Style::default().fg(th.text))];
+        // g/ (content filter) shows both keys
+        let label = if kind == 'g' { "g/".to_string() } else { kind.to_string() };
+        let lw = label.width();
+        let mut sp = vec![Span::styled(label, Style::default().fg(th.accent).add_modifier(Modifier::BOLD)), Span::styled(text.clone(), Style::default().fg(th.text))];
         // completions / live :s match count, right-aligned
         if let Some((m, k, _)) = &app.msg {
-            let used = 1 + text.width();
+            let used = lw + text.width();
             let mw = m.width();
             if used + mw + 3 < area.width as usize {
                 sp.push(Span::raw(" ".repeat(area.width as usize - used - mw - 1)));
@@ -1568,7 +1589,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         }
         f.render_widget(Paragraph::new(Line::from(sp)), area);
         let x: usize = text.chars().take(cur).map(|c| c.to_string().width()).sum();
-        f.set_cursor_position(Position::new(area.x + 1 + x as u16, area.y));
+        f.set_cursor_position(Position::new(area.x + lw as u16 + x as u16, area.y));
         return;
     }
     if app.view == View::Finder {
@@ -1999,6 +2020,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ("ge", "edit this listing in $EDITOR (/001 tags keep identity)"),
         ("g.  gs  gS  gd", "hidden · cycle sort · reverse · sizes → details → meta → off"),
         ("gw", "parent-folder column (wide popups)"),
+        ("g/pat  n N", "hit counts per row (folders: all under them) · next row with hits"),
+        ("zm  zr  g/ ⏎", "hide rows without hits · show them · end the filter"),
         ("^p", "toggle preview (^f/^b scroll it)"),
         ("^l  :e!", "refresh · discard edits here"),
         ("g?  then /", "this help · type to filter it"),

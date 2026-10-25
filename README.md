@@ -194,6 +194,8 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:stage` `:unstage` `:restore` | on the line or a range; `:restore` asks first |
 | `gd` | sizes → perms · size · age → owner · perms · xattrs (`@`) · broken links → off |
 | `gw` | parent-folder column (wide popups); click a header path segment to jump there |
+| `g/pat` `n` `N` | filter by contents: hit counts on each row (a folder's covers everything under it), others dimmed; `n` `N` jump between rows with hits, `⏎` on a folder keeps the filter, its preview lists the hits by file, `␣/` greps the same query from here; `g/` `⏎` ends it |
+| `zm` `zr` | under `g/`: hide the rows without hits · show them again |
 | `⇥` `␣␣` `␣a` `:find` · `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `␣h` | finder: all · files · grep · dirs · recent · git changes · projects · dashboard |
 
 | viewer (`⏎` on a file) | |

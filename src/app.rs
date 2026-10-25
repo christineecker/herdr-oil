@@ -114,6 +114,8 @@ pub struct App {
     pub details: u8,
     pub preview_on: bool,
     pub finder_preview: bool,
+    /// `g/pattern`: hit counts per entry, kept while moving between folders.
+    pub content: Option<crate::content::Filter>,
     /// The finder's ␣ menu (pick a source) is open.
     pub finder_menu: bool,
     /// `?` opened the full sheet (sources, row keys, view keys) instead.
@@ -326,6 +328,7 @@ impl App {
             details: cfg.details,
             preview_on: cfg.preview,
             finder_preview: true,
+            content: None,
             finder_menu: false,
             finder_sheet: false,
             finder_foot: vec![],
@@ -452,6 +455,8 @@ impl App {
             self.fwd.clear();
         }
         self.cwd = dir;
+        let d = self.cwd.clone();
+        self.content_sync(&d);
         if let Some(name) = focus {
             let store = &self.store;
             let b = self.buffers.get_mut(&self.cwd).unwrap();
@@ -883,11 +888,50 @@ impl App {
                     self.flash(if on { "only changed entries — gG shows all" } else { "showing all entries" }, MsgKind::Info);
                 }
             }
+            Action::ContentFilter(q) => self.set_content(q),
+            Action::HitsOnly(on) => {
+                if self.content.is_none() {
+                    self.flash("filter by contents first: g/pattern", MsgKind::Warn);
+                } else if self.buf().modified() {
+                    self.flash("save (:w) or discard (:e!) edits before hiding rows", MsgKind::Warn);
+                } else {
+                    if let Some(c) = self.content.as_mut() {
+                        c.only = on;
+                    }
+                    let cwd = self.cwd.clone();
+                    self.apply_keep(&cwd);
+                    self.flash(if on { "only rows with hits — zr shows all" } else { "showing all rows" }, MsgKind::Info);
+                }
+            }
+            Action::NextHit(fwd) => {
+                let store = &self.store;
+                let b = self.buffers.get(&self.cwd).unwrap();
+                let n = b.lines.len();
+                let hit = |i: usize| self.row_hits(b.lines[i].name(store)).is_some_and(|h| h > 0);
+                let next = (1..=n).map(|d| if fwd { (b.row + d) % n } else { (b.row + n - d) % n }).find(|&i| hit(i));
+                match next {
+                    Some(i) => {
+                        let b = self.buf_mut();
+                        b.row = i;
+                        b.col = 0;
+                    }
+                    None => self.flash("no rows with hits here", MsgKind::Info),
+                }
+            }
             Action::ToggleParent => {
                 self.show_parent = !self.show_parent;
                 self.flash(if self.show_parent { "parent column (wide popups)" } else { "parent column off" }, MsgKind::Info);
             }
-            Action::Finder(k) => self.open_finder(k),
+            Action::Finder(k) => {
+                self.open_finder(k);
+                // ␣/ under a content filter: the same search, here
+                let q = self.content.as_ref().map(|c| c.query.clone()).filter(|_| k == FinderKind::Grep);
+                if let (Some(q), Some(f)) = (q, self.finder.as_mut()) {
+                    f.qcur = q.chars().count();
+                    f.query = q;
+                    f.query_changed(false);
+                }
+            }
             Action::Transfer { copy } => self.start_transfer(copy),
             Action::YankPath(kind) => {
                 let p = match self.buf().cur_source_entry(&self.store) {
@@ -1255,6 +1299,60 @@ impl App {
         self.plan_cache = None;
         let cwd = self.cwd.clone();
         self.request_git(&cwd);
+        if let Some(c) = self.content.as_mut() {
+            c.forget(&cwd);
+        }
+        self.content_sync(&cwd);
+    }
+
+    // ── content filter (g/) ─────────────────────────────────────────────────
+
+    /// Start (or with an empty query end) the content filter on the cwd.
+    fn set_content(&mut self, q: String) {
+        let was_only = self.content.as_ref().is_some_and(|c| c.only);
+        self.content = (!q.trim().is_empty()).then(|| crate::content::Filter::new(q.clone()));
+        let cwd = self.cwd.clone();
+        if was_only {
+            self.apply_keep(&cwd);
+        }
+        if self.content.is_some() {
+            self.content_sync(&cwd);
+            self.flash(format!("g/{q}: hits per row · n N next · zm hides the rest · g/ ⏎ ends it"), MsgKind::Info);
+        } else {
+            self.flash("content filter off", MsgKind::Info);
+        }
+    }
+
+    /// Count `dir`'s hits if not done yet, and hide its rows without any
+    /// once they are in (under `zm`).
+    fn content_sync(&mut self, dir: &Path) {
+        let hidden = self.hidden;
+        if let Some(c) = self.content.as_mut() {
+            c.request(dir, hidden);
+        }
+        self.apply_keep(dir);
+    }
+
+    /// `zm`: list only `dir`'s rows with hits; otherwise every row. An
+    /// edited listing is left alone.
+    fn apply_keep(&mut self, dir: &Path) {
+        let want = self
+            .content
+            .as_ref()
+            .filter(|c| c.only)
+            .and_then(|c| c.counts(dir))
+            .map(|m| m.iter().filter(|(_, n)| **n > 0).map(|(k, _)| k.clone()).collect::<std::collections::HashSet<_>>());
+        let (h, s) = (self.hidden, self.sort);
+        if let Some(b) = self.buffers.get_mut(dir).filter(|b| b.keep != want && !b.modified()) {
+            b.keep = want;
+            b.reload(&mut self.store, h, s, false);
+            self.plan_cache = None;
+        }
+    }
+
+    /// The content filter's hits for the cwd entry `name` (None while counting).
+    pub fn row_hits(&self, name: &str) -> Option<usize> {
+        self.content.as_ref()?.counts(&self.cwd).map(|m| m.get(name).copied().unwrap_or(0))
     }
 
     /// Ask the background worker for `dir`'s git status (badges, branch).
@@ -1306,7 +1404,7 @@ impl App {
 
     /// Background work the screen is waiting for.
     pub fn busy(&self) -> bool {
-        !self.git_pending.is_empty() || self.preview.pending.is_some() || self.viewer_cache.pending.is_some()
+        !self.git_pending.is_empty() || self.content.as_ref().is_some_and(|c| c.busy()) || self.preview.pending.is_some() || self.viewer_cache.pending.is_some()
     }
 
     /// The plan the edited buffers make, rebuilt only when their text changes.
@@ -1920,10 +2018,13 @@ impl App {
                 return;
             }
             (KeyCode::Char('o'), true, _) if tree_dir.is_some() => {
+                // the folder, filtered by the same search
+                let q = f.query.clone();
                 if let Some(d) = tree_dir {
                     self.goto(&d, None);
                     self.view = View::Explorer;
                     self.finder_only = false;
+                    self.set_content(q);
                 }
                 return;
             }
@@ -2458,6 +2559,10 @@ impl App {
                 f.tick();
             }
             self.poll_git();
+            let counted = self.content.as_mut().map(|c| c.poll()).unwrap_or_default();
+            for d in counted {
+                self.apply_keep(&d);
+            }
             self.preview.poll();
             self.viewer_cache.poll();
             terminal.draw(|fr| crate::ui::draw(fr, self))?;
@@ -2549,6 +2654,59 @@ mod tests {
         key(&mut app, KeyCode::Backspace);
         key(&mut app, KeyCode::Backspace);
         assert_eq!(app.view, View::Explorer);
+    }
+
+    #[test]
+    fn content_filter_counts_hides_and_jumps() {
+        let (t, mut app) = app_in("app-content");
+        std::fs::write(t.0.join("a.txt"), "needle\n").unwrap();
+        std::fs::write(t.0.join("src/deep/x.rs"), "needle needle\n").unwrap();
+        app.reload_cwd();
+        let typed = |app: &mut App, s: &str| {
+            for c in s.chars() {
+                app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+        };
+        let settle = |app: &mut App| {
+            let t0 = Instant::now();
+            while app.content.as_ref().is_some_and(|c| c.busy()) && t0.elapsed() < Duration::from_secs(5) {
+                for d in app.content.as_mut().unwrap().poll() {
+                    app.apply_keep(&d);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        typed(&mut app, "g/needle");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        settle(&mut app);
+        assert_eq!((app.row_hits("a.txt"), app.row_hits("b.txt")), (Some(1), Some(0)));
+        assert!(app.row_hits("src").is_some_and(|n| n >= 1), "a folder counts everything under it");
+        let names = |app: &App| app.buf().lines.iter().map(|l| l.name(&app.store).to_string()).collect::<Vec<_>>();
+        assert_eq!(names(&app), ["src", "a.txt", "b.txt"]);
+        // n from the top lands on the next row with hits, wrapping
+        app.buf_mut().row = 0;
+        typed(&mut app, "n");
+        assert_eq!(app.buf().row, 1);
+        typed(&mut app, "n");
+        assert_eq!(app.buf().row, 0);
+        // the counts and the filter show on screen
+        let text = screen(&mut app, 100, 12).join("\n");
+        assert!(text.contains("g/needle"), "{text}");
+        // zm hides rows without hits, and :w would not delete them
+        typed(&mut app, "zm");
+        assert_eq!(names(&app), ["src", "a.txt"]);
+        assert!(!app.buf().modified());
+        // the filter follows into a folder
+        app.goto(&t.0.join("src"), None);
+        settle(&mut app);
+        assert_eq!(names(&app), ["deep"]);
+        typed(&mut app, "zr");
+        app.goto(&t.0, None);
+        settle(&mut app);
+        assert_eq!(names(&app).len(), 3);
+        typed(&mut app, "g/");
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.content.is_none());
     }
 
     fn screen(app: &mut App, w: u16, h: u16) -> Vec<String> {

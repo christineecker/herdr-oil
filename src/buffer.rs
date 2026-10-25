@@ -53,6 +53,8 @@ pub struct Buffer {
     pub branch: Option<Branch>,
     /// `gG`: list only entries with a git status (and folders holding some).
     pub only_changed: bool,
+    /// `zm` under a content filter: list only these names.
+    pub keep: Option<std::collections::HashSet<String>>,
     pub error: Option<String>,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
@@ -80,6 +82,7 @@ impl Buffer {
             git: HashMap::new(),
             branch: None,
             only_changed: false,
+            keep: None,
             error: None,
             undo: vec![],
             redo: vec![],
@@ -116,11 +119,11 @@ impl Buffer {
         if git || self.only_changed {
             (self.git, self.branch) = crate::entry::git_status_full(&self.dir);
         }
-        if self.only_changed {
-            let git = &self.git;
+        if self.only_changed || self.keep.is_some() {
+            let (git, names, only) = (&self.git, &self.keep, self.only_changed);
             let keep = |l: &Line| {
                 let name = crate::plan::split_link(&l.text).0.trim_end_matches('/');
-                git.get(name).is_some_and(|g| g.letter != '!')
+                (!only || git.get(name).is_some_and(|g| g.letter != '!')) && names.as_ref().map_or(true, |k| k.contains(name))
             };
             self.lines.retain(keep);
             let ids: std::collections::HashSet<u64> = self.lines.iter().filter_map(|l| l.id).collect();
@@ -347,6 +350,7 @@ mod tests {
             git: HashMap::new(),
             branch: None,
             only_changed: false,
+            keep: None,
             error: None,
             undo: vec![],
             redo: vec![],

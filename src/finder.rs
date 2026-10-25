@@ -151,6 +151,40 @@ pub fn grep_query(q: &str) -> (String, Vec<String>) {
     (pat.to_string(), out)
 }
 
+/// The search behind a grep query (see [`grep_query`]) under `dir`:
+/// ripgrep when installed, else grep. Prints `path:line:text` per hit, or
+/// with `counts` one `path:N` per file. None for an empty pattern.
+pub fn grep_cmd(q: &str, dir: &Path, hidden: bool, no_ignore: bool, counts: bool) -> Option<Command> {
+    let (pat, filters) = grep_query(q);
+    if pat.trim().is_empty() {
+        return None;
+    }
+    let mut cmd;
+    if rg_available() {
+        cmd = Command::new("rg");
+        cmd.args(["--no-heading", "--color=never", "--smart-case", "--glob=!.git"]);
+        if counts {
+            cmd.arg("--count-matches");
+        } else {
+            cmd.args(["--line-number", "--max-columns=300", "--max-columns-preview", "--max-count=200"]);
+        }
+        if hidden {
+            cmd.arg("--hidden");
+        }
+        if no_ignore {
+            cmd.arg("--no-ignore");
+        }
+        cmd.args(&filters).arg("--").arg(&pat).arg(".");
+    } else {
+        cmd = Command::new("grep");
+        cmd.args([if counts { "-rcI" } else { "-rnI" }, "--exclude-dir=.git", "-i"]);
+        cmd.args(filters.iter().filter_map(|f| f.strip_prefix("--glob=")).map(|g| format!("--include={g}")));
+        cmd.arg("-e").arg(&pat).arg(".");
+    }
+    cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    Some(cmd)
+}
+
 fn rg_available() -> bool {
     static RG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *RG.get_or_init(|| Command::new("rg").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success()))
@@ -618,31 +652,9 @@ impl Finder {
         self.grep.truncated.store(false, Ordering::Relaxed);
         let q = self.query.clone();
         self.grep.launched = Some(q.clone());
-        let (pat, filters) = grep_query(&q);
-        if pat.trim().is_empty() {
-            return;
-        }
+        let Some(mut cmd) = grep_cmd(&q, &self.root, self.hidden, self.no_ignore, false) else { return };
         let cancel = Arc::new(AtomicBool::new(false));
         self.grep.cancel = cancel.clone();
-        let mut cmd;
-        let rg = rg_available();
-        if rg {
-            cmd = Command::new("rg");
-            cmd.args(["--line-number", "--no-heading", "--color=never", "--smart-case", "--max-columns=300", "--max-columns-preview", "--max-count=200", "--glob=!.git"]);
-            if self.hidden {
-                cmd.arg("--hidden");
-            }
-            if self.no_ignore {
-                cmd.arg("--no-ignore");
-            }
-            cmd.args(&filters).arg("--").arg(&pat).arg(".");
-        } else {
-            cmd = Command::new("grep");
-            cmd.args(["-rnI", "--exclude-dir=.git", "-i"]);
-            cmd.args(filters.iter().filter_map(|f| f.strip_prefix("--glob=")).map(|g| format!("--include={g}")));
-            cmd.arg("-e").arg(&pat).arg(".");
-        }
-        cmd.current_dir(&self.root).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
         let Ok(mut child) = cmd.spawn() else { return };
         let stdout = child.stdout.take();
         if let Ok(mut c) = self.grep.child.lock() {
@@ -1015,7 +1027,7 @@ fn plan_normalize(p: &Path) -> PathBuf {
     crate::plan::normalize(p)
 }
 
-fn parse_hit(line: &str, root: &Path) -> Option<Hit> {
+pub fn parse_hit(line: &str, root: &Path) -> Option<Hit> {
     // path:line:text — path may contain ':' so split from the left on the
     // first ":<digits>:".
     let bytes = line.as_bytes();

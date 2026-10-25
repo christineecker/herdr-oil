@@ -23,6 +23,8 @@ pub enum Show {
     /// A project card: herdr workspace, branch, changes, last commits,
     /// then the folder listing with its README.
     Project,
+    /// A folder's hits for the content filter's query, by file.
+    Hits,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -34,6 +36,8 @@ pub struct Key {
     pub mtime: Option<std::time::SystemTime>,
     pub show: Show,
     pub hidden: bool,
+    /// `Show::Hits`: the query.
+    pub grep: String,
 }
 
 /// Key, lines, focus, and whether the lines are a git diff (headed by
@@ -53,6 +57,8 @@ pub struct Cache {
     pub diffed: bool,
     /// Requested, not rendered yet.
     pub pending: Option<Key>,
+    /// The query `Show::Hits` searches for (set before [`Cache::get`]).
+    pub grep: String,
     tx: Option<std::sync::mpsc::Sender<(Key, Theme)>>,
     rx: Option<std::sync::mpsc::Receiver<Rendered>>,
 }
@@ -110,7 +116,8 @@ impl Cache {
     #[allow(clippy::too_many_arguments)]
     pub fn get(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, show: Show) -> &Cache {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden };
+        let grep = if show == Show::Hits { self.grep.clone() } else { String::new() };
+        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden, grep };
         self.poll();
         if self.key.as_ref() != Some(&key) && self.pending.as_ref() != Some(&key) {
             let sent = self.worker().is_some_and(|tx| tx.send((key.clone(), th.clone())).is_ok());
@@ -153,7 +160,8 @@ impl Cache {
     #[allow(clippy::too_many_arguments)]
     pub fn get_now(&mut self, path: &Path, line: Option<usize>, width: u16, th: &Theme, hidden: bool, max: usize, show: Show) -> &Cache {
         let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden };
+        let grep = if show == Show::Hits { self.grep.clone() } else { String::new() };
+        let key = Key { path: path.to_path_buf(), line, width, max, mtime, show, hidden, grep };
         let (lines, focus, diffed) = render_key(&key, th);
         (self.lines, self.focus, self.diffed, self.key, self.pending) = (lines, focus, diffed, Some(key), None);
         self
@@ -167,7 +175,35 @@ fn render_key(k: &Key, th: &Theme) -> (Vec<Line<'static>>, usize, bool) {
         Show::Log => (git_log(&k.path, th, k.max), 0, false),
         Show::Project => (project(&k.path, th, k.hidden, k.max, k.width), 0, false),
         Show::File => plain(render(&k.path, k.line, k.width, th, k.hidden, k.max)),
+        Show::Hits => (hits(&k.path, &k.grep, th, k.hidden, k.max), 0, false),
     }
+}
+
+/// A folder's hits for `q`, grouped by file: the file (relative to `dir`)
+/// with its hit count, then each hit's line number and text.
+fn hits(dir: &Path, q: &str, th: &Theme, hidden: bool, max: usize) -> Vec<Line<'static>> {
+    let hs = crate::content::hits(q, dir, hidden, max);
+    if hs.is_empty() {
+        return vec![Line::styled("  no hits in this folder", Style::default().fg(th.dim).add_modifier(Modifier::ITALIC))];
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < hs.len() {
+        let n = hs[i..].iter().take_while(|h| h.path == hs[i].path).count();
+        if !out.is_empty() {
+            out.push(Line::raw(""));
+        }
+        let rel = hs[i].path.strip_prefix(dir).unwrap_or(&hs[i].path).display().to_string();
+        out.push(Line::from(vec![
+            Span::styled(format!(" {rel}"), Style::default().fg(th.blue).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {n}"), Style::default().fg(th.dim)),
+        ]));
+        for h in &hs[i..i + n] {
+            out.push(Line::from(vec![Span::styled(format!(" {:>5}  ", h.line), Style::default().fg(th.dim)), Span::styled(h.text.trim_start().to_string(), Style::default().fg(th.text))]));
+        }
+        i += n;
+    }
+    out
 }
 
 /// `git log --graph` of a path, coloured by git.
