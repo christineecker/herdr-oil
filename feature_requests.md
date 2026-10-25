@@ -19,7 +19,7 @@ Items marked **Review note** were checked against the code; the note records cor
    - Templates and `gh repo create`, the GitHub browser and clone, worktree create, start agent, lazygit split, zoxide ranking, `[recipe]`.
 
 3. **One popup: the explorer on the empty prompt**
-   - **Current state:** Step 1 is in: the empty prompt sits over the listing, the two focus states work (INSERT / NORMAL badge), `esc` no longer closes, `/` `+` `<` `@` from the list focus the prompt, and results are read-only (`⏎` in the result list opens the row's folder in the listing; `]` `[` took over group jumps from `⇥`). `?` is now the listing's name search. The Dash rows are on `␣h`.
+   - **Current state:** The explorer (`prefix+d`) and the finder are separate views, and `⇥` switches between them. The finder opens on All, whose empty prompt shows the Dash rows.
    - **Suggestion:** Merge them. On an empty prompt the finder's list is the explorer's editable listing of the current folder. Typing filters names across subfolders, and `/pattern` shows the grep tree (`alt-t`). Rows stay editable at every step (item 1 and its extensions), and pending edits survive changing the query. `prefix+d` opens the popup with focus on the list, and `prefix+/` opens it with focus on the prompt and `/` typed. The first entry in the sources row becomes `› files`.
    - **Two focus states:** INSERT (prompt): letters type; `↑` `↓` `⏎` still work; `esc` moves focus to the list. NORMAL (list): every explorer key; `esc` clears the query; `q` closes the popup (asking first when edits are pending); `/` `+` `<` `@` focus the prompt with that sigil typed; `⇥` toggles focus. The footer badge names the state. `h` `l` fold the grep tree in NORMAL (as `←` `→` do today) and are letters in INSERT.
    - **Changes from today:** `esc` no longer closes or goes back. `⇥` toggles focus instead of switching views. In the list, `/` starts a grep instead of vim's name search; the prompt's name filter replaces that search. The Dash rows move from the empty prompt to `␣h`.
@@ -27,5 +27,5 @@ Items marked **Review note** were checked against the code; the note records cor
    - **Decided:** A row whose edit stops matching the query stays visible until `:w`.
    - **Decided:** The preview heading keeps its diff overview in every state: git letter, name, size and age on the left, `+N −M` and the bar on the right (`draw_preview_head`), with the diff in the body. For pending line edits the heading uses the same `+N −M` and bar, counted against the file on disk.
    - **Open question:** After `:w`, should the popup return to the listing or stay on the results?
-   - **Build order:** (1) done; (2) multi-folder editing (item 1), so rows stay editable under a query, then `Op::Patch`.
+   - **Build order:** (1) the listing on the empty prompt and the two focus states, with results read-only and `⏎` on a result opening its folder in the listing; (2) multi-folder editing (item 1), then `Op::Patch`.
    - **Mockup:** walkthrough of seven states plus a key table (claude.ai artifact "Oil One Popup").

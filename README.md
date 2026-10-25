@@ -30,33 +30,26 @@ case-only renames on APFS, "move the child out, delete the parent" and
 overwritten; clashes are reported before anything runs, and flagged on
 the line (`! ✗ already exists`) while you type.
 
-The explorer and the finder are one popup: a prompt over the listing.
-On an empty prompt the list is the editable listing of the current folder;
-typing there searches **All** (files and folders from one walk under it),
-and a first character
+The finder (`⇥` from the explorer, or its own key) is one prompt. It opens
+on **All**: files and folders from one walk, and while the query is empty the
+Dash rows (pending edits, changes, marked and recent files). A first character
 picks another source and stays in front of the query as its sigil: `/` grep,
 `+` git changes, `<` recent, `@` projects (`/fn main` greps for `fn main`).
 None of these start an fzf term, so `'exact`, `^prefix` and `!not` still work.
-Focus is on the prompt (INSERT: letters type, `↑` `↓` `⏎` still move and
-open) or on the list (NORMAL: on the listing every explorer key, on results
-`j` `k` `]` `[` move, `⏎` opens the row's folder in the listing); `esc` and
-`⇥` move between them, `esc` in a result list clears the query, `q` closes
-the popup, and `/` `+` `<` `@` from the list focus the prompt with that
-source. The results are read-only for now. A row above it lists the sources (the current one in its colour), the
+A row above it lists the sources (the current one in its colour), the
 count (`N of M` while filtering, `N to triage`, `N hits`), root and
 non-default flags. The prompt is the sigil, the query (empty: a noun saying
 what to type) and the branch on the right. Pause two seconds on an empty
 prompt and it lists the sigils too. The list and the preview each get a
 one-line heading: what is listed and how many; the file's git letter, name,
 size and age, with `+N −M` for a change.
-The footer is the focus badge (`INSERT` or `NORMAL`), the position (`3 of 40 · 2 marked`) and at
+The footer is a `FIND` badge, the position (`3 of 40 · 2 marked`) and at
 most two keys for the selected row (`⏎ focus workspace · ^t tab`,
-`⏎ diff · ^a unstage`, `^s send 3`) plus what `esc` does and `? keys`. A pane
-under 12 rows keeps just the prompt and the list. `⌫` on an empty query goes back to the listing; `␣`
+`⏎ diff · ^a unstage`, `^s send 3`) plus `esc back` and `? keys`. A pane
+under 12 rows keeps just the prompt and the list. `⌫` on an empty query goes back to All; `␣`
 there opens a menu of every source (`a f d g r s p h`, the same letters as
 the explorer's `␣` keys) and `?` one sheet with the sources, every key for
-the current source, the view keys and the query syntax; `]` / `[` in the
-result list jump to the next group: the next file in grep, the next section in Dash,
+the current source, the view keys and the query syntax; `⇥` jumps to the next group: the next file in grep, the next section in Dash,
 the next folder elsewhere. The sources:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
 matching, fzf query syntax), **Grep** (live ripgrep; `alt-t` nests the hits
@@ -172,8 +165,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 |---|---|
 | `⏎` `-` `_` `~` | view file / enter dir · parent · start dir · home |
 | `:w` `^s` `ZZ` | review & apply · apply and quit |
-| `q` | close (asks first when edits are unsaved); `esc` only cancels a pending key |
-| `⇥` · `/` `+` `<` `@` | focus the prompt · with that source (grep, changes, recent, projects) |
+| `q` `esc` | close (asks first when edits are unsaved; esc cancels a pending key first) |
 | `u` `^r` `.` | undo · redo (per directory) · repeat the last change |
 | `U` `:undo-apply` | roll back the last `:w` (moves go home, Trash comes back, new entries go to Trash); `U` again redoes. Permanent deletes can't come back, and an apply that only deleted permanently leaves nothing to undo |
 | `ge` `:edit-buffer` | edit the listing in `$EDITOR` (`/001 name` tags keep identity, like oil.nvim); back in the explorer with the edits staged |
@@ -190,7 +182,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `:cd p` `:touch a b` `:mkdir d` `:sort mtime` `:sort!` `:e!` | `⇥` completes commands, `:cd` / `:e` paths, `:sort` / `:chmod` / `:recipe` arguments and listed names after `:s/` and `:touch` |
 | `↑` `↓` `^p` `^n` in `:` / `/` | history, filtered by what is typed; kept across sessions |
 | `^a` `^e` `^w` `^u` `^k` `alt-b` `alt-f` | readline editing, the same in `:`, `/`, the viewer prompt and the finder |
-| `?pat` `:noh` | search the names; matches stay highlighted until `:noh` (`/` greps from the prompt) |
+| `/pat` `:noh` | search; matches stay highlighted until `:noh` |
 | `{#}` `{03#}` `{#10}` `{#0+5}` | counters in `:s` replacements and `:prefix` / `:suffix` (per match, in buffer order); `\{` is a literal brace |
 | `:g/pat/d` `:v/pat/d` `:g/pat/s/a/b/` | act on lines matching (or not) a regex; the lines to delete are struck through while you type |
 | `:recipe NAME` | `kebab` `snake` `slugify` `lower` `upper` `title` `clean` `screenshots`, plus your own from the config |
@@ -204,7 +196,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `gw` | parent-folder column (wide popups); click a header path segment to jump there |
 | `g/pat` `n` `N` | filter by contents: hit counts on each row (a folder's covers everything under it), others dimmed; `n` `N` jump between rows with hits, `⏎` on a folder keeps the filter, its preview lists the hits by file, `␣/` greps the same query from here; `g/` `⏎` ends it |
 | `zm` `zr` | under `g/`: hide the rows without hits · show them again |
-| `⇥` `␣␣` `␣a` `:find` · `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `␣h` | the prompt (all) · files · grep · dirs · recent · git changes · projects · dashboard |
+| `⇥` `␣␣` `␣a` `:find` · `␣f` `␣g` `␣d` `␣r` `␣s` `␣p` `␣h` | finder: all · files · grep · dirs · recent · git changes · projects · dashboard |
 
 | viewer (`⏎` on a file) | |
 |---|---|
@@ -231,11 +223,9 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | finder | |
 |---|---|
 | `/` `@` `+` `<` typed first | switch to grep · projects · git changes · recent (from All or Files) |
-| `esc` `⇥` | prompt (INSERT) ⇄ list (NORMAL) |
-| list: `j` `k` `g` `G` `]` `[` · `⏎` · `esc` · `q` | move · next / previous group · open the row's folder in the listing · clear the query · close |
 | `␣` `?` on an empty query | menu of sources: `a` all · `f` files · `d` folders · `g` grep · `r` recent · `s` changes · `p` projects · `h` dash |
-| `⌫` on an empty query | back to All, then to the listing |
-| picking a move/copy target: `⇥` | files ⇄ folders |
+| `⌫` on an empty query | back to All, then to the explorer |
+| `⇥` `⇧⇥` | next · previous group (grep: file · Dash: section · otherwise folder); picking a move/copy target: files ⇄ folders |
 | `^o` | reveal the selection in the explorer |
 | `^space` | mark files or grep hits (each hit keeps its line); `⏎` opens them all, `^s` sends them |
 | `^r` | root: cwd → repository root → parent |
@@ -251,7 +241,7 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 Vim support: counts, `h j k l w b e W B E 0 ^ $ gg G f F t T ;`, operators
 `d c y` with motions and text objects `iw aw iW aW`, plus `in`/`an` for the
 file-name stem and extension (`cin` renames `report.md` keeping `.md`),
-`x X s S C D r J ~ p P o O i a I A`, visual line mode, `?` search with `n N`.
+`x X s S C D r J ~ p P o O i a I A`, visual line mode, `/` search with `n N`.
 
 ## Config
 

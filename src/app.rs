@@ -116,11 +116,6 @@ pub struct App {
     pub finder_preview: bool,
     /// `g/pattern`: hit counts per entry, kept while moving between folders.
     pub content: Option<crate::content::Filter>,
-    /// The popup's two focus states: on the listing, the prompt above it
-    /// takes keys when `prompt` (INSERT) and the listing otherwise (NORMAL);
-    /// on finder results, `finder_list` moves keys from the prompt to the list.
-    pub prompt: bool,
-    pub finder_list: bool,
     /// The finder's ␣ menu (pick a source) is open.
     pub finder_menu: bool,
     /// `?` opened the full sheet (sources, row keys, view keys) instead.
@@ -131,6 +126,8 @@ pub struct App {
     pub last_key: Instant,
     pub view: View,
     pub finder: Option<Finder>,
+    /// Finder opened on its own (launch mode) — Esc quits instead of going back.
+    pub finder_only: bool,
     pub overlay: Overlay,
     pub msg: Option<(String, MsgKind, Instant)>,
     pub origin: Option<String>,
@@ -332,14 +329,13 @@ impl App {
             preview_on: cfg.preview,
             finder_preview: true,
             content: None,
-            prompt: false,
-            finder_list: false,
             finder_menu: false,
             finder_sheet: false,
             finder_foot: vec![],
             last_key: Instant::now(),
             view: View::Explorer,
             finder: None,
+            finder_only: false,
             overlay: Overlay::None,
             msg: None,
             origin: std::env::var("HERDR_OIL_ORIGIN").ok().filter(|s| crate::launch::flag_safe(s)),
@@ -380,14 +376,34 @@ impl App {
         app.vim.recipes = app.cfg.recipes.clone();
         app.goto(&dir, focus.as_deref());
         match mode {
-            // the empty prompt over the listing
-            "finder" => app.prompt = true,
-            "files" => app.open_finder(FinderKind::Files),
-            "dash" => app.open_finder(FinderKind::Dash),
-            "grep" => app.open_finder(FinderKind::Grep),
-            "recent" => app.open_finder(FinderKind::Recent),
-            "git" | "changes" => app.open_finder(FinderKind::Git),
-            "projects" | "hop" => app.open_finder(FinderKind::Projects),
+            "finder" => {
+                app.open_finder(FinderKind::All);
+                app.finder_only = true;
+            }
+            "files" => {
+                app.open_finder(FinderKind::Files);
+                app.finder_only = true;
+            }
+            "dash" => {
+                app.open_finder(FinderKind::Dash);
+                app.finder_only = true;
+            }
+            "grep" => {
+                app.open_finder(FinderKind::Grep);
+                app.finder_only = true;
+            }
+            "recent" => {
+                app.open_finder(FinderKind::Recent);
+                app.finder_only = true;
+            }
+            "git" | "changes" => {
+                app.open_finder(FinderKind::Git);
+                app.finder_only = true;
+            }
+            "projects" | "hop" => {
+                app.open_finder(FinderKind::Projects);
+                app.finder_only = true;
+            }
             _ => {}
         }
         app
@@ -619,6 +635,7 @@ impl App {
         let count = lines.len();
         self.transfer = Some(Transfer { copy, lines, count });
         self.view = View::Finder;
+        self.finder_only = false;
         self.preview_scroll = 0;
     }
 
@@ -695,8 +712,6 @@ impl App {
     fn open_finder(&mut self, k: FinderKind) {
         self.finder_menu = false;
         self.finder_sheet = false;
-        self.finder_list = false;
-        self.prompt = false;
         if matches!(k, FinderKind::Dash | FinderKind::All) {
             let pending = self.pending_tags();
             let f = self.finder.get_or_insert_with(|| Finder::new(FinderKind::Files, self.cwd.clone(), &self.cfg));
@@ -710,15 +725,8 @@ impl App {
         self.preview_scroll = 0;
     }
 
-    /// Switch the open finder's source (␣ menu, ⌫ back to All); the query
-    /// stays. All with an empty query is the listing under the prompt.
+    /// Switch the open finder's source (␣ menu, ⌫ back to All); the query stays.
     fn finder_switch(&mut self, k: FinderKind) {
-        if k == FinderKind::All && self.finder.as_ref().is_some_and(|f| f.query.is_empty()) {
-            self.view = View::Explorer;
-            self.prompt = true;
-            self.finder_list = false;
-            return;
-        }
         let pending = matches!(k, FinderKind::Dash | FinderKind::All).then(|| self.pending_tags());
         if let Some(f) = self.finder.as_mut() {
             if let Some(p) = pending {
@@ -729,112 +737,12 @@ impl App {
         self.preview_scroll = 0;
     }
 
-    /// The prompt over the listing got text: show the finder's results
-    /// for it (a sigil first picks the source), focus still on the prompt.
-    fn prompt_typed(&mut self, q: &str) {
-        self.open_finder(FinderKind::All);
-        if let Some(f) = self.finder.as_mut() {
-            f.query = q.to_string();
-            f.qcur = q.chars().count();
-            if !f.take_sigil() {
-                f.query_changed(true);
-            }
-        }
-    }
-
-    /// Back from the results to the listing (NORMAL): the query is cleared.
-    fn close_results(&mut self) {
-        self.view = View::Explorer;
-        self.prompt = false;
-        self.finder_list = false;
-        if let Some(f) = self.finder.as_mut() {
-            f.query.clear();
-            f.qcur = 0;
-            f.query_changed(false);
-        }
-    }
-
-    /// Keys while the prompt over the listing has focus (INSERT): typing
-    /// starts a search; ↑ ↓ ⏎ still move and open; esc / ⇥ go to the list.
-    fn listing_prompt_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => self.prompt = false,
-            KeyCode::Char('c' | 'q') if ctrl => self.try_quit(false),
-            KeyCode::Up | KeyCode::Down => {
-                let b = self.buf_mut();
-                b.row = if k.code == KeyCode::Up { b.row.saturating_sub(1) } else { (b.row + 1).min(b.lines.len() - 1) };
-                b.col = 0;
-                b.follow();
-                self.preview_scroll = 0;
-            }
-            KeyCode::Enter => {
-                self.prompt = false;
-                self.act(Action::Open(None));
-            }
-            KeyCode::Char(' ') => {}
-            _ => {
-                let (mut q, mut cur) = (String::new(), 0);
-                if let crate::input::Edit::Changed(_) = crate::input::edit(&mut q, &mut cur, k) {
-                    if !q.is_empty() {
-                        self.prompt_typed(&q);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Keys while the finder's results have focus (NORMAL). They are
-    /// read-only: ⏎ opens the row's folder in the listing. False for keys
-    /// left to the finder (^ and alt chords, PgUp/PgDn; Git and Projects ⏎).
-    fn results_key(&mut self, k: KeyEvent) -> bool {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
-        if ctrl || alt {
-            return false;
-        }
-        let Some(f) = self.finder.as_mut() else { return false };
-        match k.code {
-            KeyCode::Esc => self.close_results(),
-            KeyCode::Char('q') => self.try_quit(false),
-            KeyCode::Tab | KeyCode::BackTab => self.finder_list = false,
-            KeyCode::Char('j') | KeyCode::Down => f.move_sel(1),
-            KeyCode::Char('k') | KeyCode::Up => f.move_sel(-1),
-            KeyCode::Char('g') => f.sel = 0,
-            KeyCode::Char('G') => f.sel = f.len().saturating_sub(1),
-            KeyCode::Char(']') => f.jump_group(1),
-            KeyCode::Char('[') => f.jump_group(-1),
-            KeyCode::Char('h') | KeyCode::Left if f.tree_view() => f.fold(false),
-            KeyCode::Char('l') | KeyCode::Right if f.tree_view() => f.fold(true),
-            KeyCode::Char(c @ ('/' | '+' | '<' | '@')) => {
-                // the prompt, with that source
-                self.finder_list = false;
-                f.query.clear();
-                f.qcur = 0;
-                f.query_changed(false);
-                if let Some(kind) = FinderKind::from_sigil(c) {
-                    self.finder_switch(kind);
-                }
-            }
-            KeyCode::Enter if matches!(f.kind, FinderKind::Git | FinderKind::Projects) => return false,
-            KeyCode::Enter => {
-                let Some(it) = f.selected() else { return true };
-                let (dir, name) = if it.is_dir { (it.abs.clone(), None) } else { (it.abs.parent().map(Path::to_path_buf).unwrap_or_default(), it.abs.file_name().map(|n| n.to_string_lossy().into_owned())) };
-                self.close_results();
-                self.goto(&dir, name.as_deref());
-            }
-            KeyCode::PageUp | KeyCode::PageDown => return false,
-            _ => {}
-        }
-        self.preview_scroll = 0;
-        true
-    }
-
     fn reveal(&mut self, p: &Path) {
         let dir = p.parent().unwrap_or(Path::new("/")).to_path_buf();
         let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
         self.goto(&dir, name.as_deref());
         self.view = View::Explorer;
+        self.finder_only = false;
     }
 
     // ── actions from the explorer keymap ────────────────────────────────────
@@ -1014,9 +922,6 @@ impl App {
                 self.show_parent = !self.show_parent;
                 self.flash(if self.show_parent { "parent column (wide popups)" } else { "parent column off" }, MsgKind::Info);
             }
-            // All on an empty query is the listing: focus the prompt over it
-            Action::Finder(FinderKind::All) | Action::Prompt(None) => self.prompt = true,
-            Action::Prompt(Some(c)) => self.prompt_typed(&c.to_string()),
             Action::Finder(k) => {
                 self.open_finder(k);
                 // ␣/ under a content filter: the same search, here
@@ -1788,7 +1693,6 @@ impl App {
             return;
         }
         match self.view {
-            View::Explorer if self.prompt => self.listing_prompt_key(k),
             View::Explorer => {
                 self.vim.msg = None;
                 let cwd = self.cwd.clone();
@@ -2010,9 +1914,6 @@ impl App {
             self.finder_sheet = k.code == KeyCode::Char('?');
             return;
         }
-        if self.transfer.is_none() && self.finder_list && self.results_key(k) {
-            return;
-        }
         if self.transfer.is_none() && self.finder.as_ref().is_some_and(|f| f.kind == FinderKind::Projects) && self.project_key(k) {
             return;
         }
@@ -2022,13 +1923,17 @@ impl App {
         // grep tree: the folder row under the cursor
         let tree_dir = if f.tree_view() { f.selected().filter(|it| it.is_dir).map(|it| it.abs) } else { None };
         match (k.code, ctrl, alt) {
-            (KeyCode::Char('c'), true, _) | (KeyCode::Char('q'), true, _) => {
-                self.try_quit(false);
+            (KeyCode::Esc, _, _) | (KeyCode::Char('c'), true, _) | (KeyCode::Char('q'), true, _) => {
+                if self.finder_only || (k.code == KeyCode::Char('c') && ctrl) {
+                    self.try_quit(false);
+                } else {
+                    self.view = View::Explorer;
+                }
                 return;
             }
-            // esc / ⇥: focus the results (NORMAL)
-            (KeyCode::Esc, _, _) | (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
-                self.finder_list = !self.finder_list;
+            (KeyCode::Tab, _, _) | (KeyCode::BackTab, _, _) => {
+                f.jump_group(if k.code == KeyCode::BackTab { -1 } else { 1 });
+                self.preview_scroll = 0;
                 return;
             }
             (KeyCode::Enter, _, _) if f.kind == FinderKind::Git && !self.pick => {
@@ -2118,6 +2023,7 @@ impl App {
                 if let Some(d) = tree_dir {
                     self.goto(&d, None);
                     self.view = View::Explorer;
+                    self.finder_only = false;
                     self.set_content(q);
                 }
                 return;
@@ -2176,8 +2082,12 @@ impl App {
             (KeyCode::Char('f'), true, _) => self.preview_scroll += 10,
             (KeyCode::Char('b'), true, _) => self.preview_scroll = self.preview_scroll.saturating_sub(10),
             (KeyCode::Char('p'), _, true) | (KeyCode::Char('l'), true, _) => self.finder_preview = !self.finder_preview,
-            (KeyCode::Backspace, false, false) if f.query.is_empty() => {
+            (KeyCode::Backspace, false, false) if f.query.is_empty() && f.kind != FinderKind::All => {
                 self.finder_switch(FinderKind::All);
+                return;
+            }
+            (KeyCode::Backspace, false, false) if f.query.is_empty() && !self.finder_only => {
+                self.view = View::Explorer;
                 return;
             }
             _ => {
@@ -2191,11 +2101,6 @@ impl App {
                 f.query_changed(appended);
             }
             self.preview_scroll = 0;
-            if f.kind == FinderKind::All && f.query.is_empty() {
-                // the listing again, focus on the prompt
-                self.finder_switch(FinderKind::All);
-                return;
-            }
         }
         if let Some(how) = open_how {
             let marked = f.marked.clone();
@@ -2208,6 +2113,7 @@ impl App {
                 let p = it.abs.clone();
                 self.goto(&p, None);
                 self.view = View::Explorer;
+                self.finder_only = false;
                 return;
             }
             if marked.is_empty() {
@@ -2260,6 +2166,7 @@ impl App {
                     projects::bump_recent(&settings.recent_file, &p.path);
                     self.goto(&p.path, None);
                     self.view = View::Explorer;
+                    self.finder_only = false;
                 }
             }
             (KeyCode::Char('f'), true, _) | (KeyCode::Char('g'), _, true) => {
@@ -2725,68 +2632,28 @@ mod tests {
     #[test]
     fn finder_sigils_backspace_and_menu() {
         let (_t, mut app) = app_in("app-omnibar");
-        let key = |app: &mut App, c: KeyCode| app.key(KeyEvent::new(c, KeyModifiers::NONE));
-        // ⇥ focuses the prompt over the listing; esc goes back to the list
-        key(&mut app, KeyCode::Tab);
-        assert!(app.prompt && app.view == View::Explorer);
-        key(&mut app, KeyCode::Esc);
-        assert!(!app.prompt && !app.quit, "esc does not close the popup");
-        // a sigil typed in the list focuses the prompt with that source
+        let key = |app: &mut App, c: KeyCode| app.finder_key(KeyEvent::new(c, KeyModifiers::NONE));
+        app.act(Action::Finder(FinderKind::All));
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::All);
+        // a sigil typed first switches source and is not kept in the query
         key(&mut app, KeyCode::Char('/'));
         key(&mut app, KeyCode::Char('x'));
         let f = app.finder.as_ref().unwrap();
-        assert_eq!((app.view, f.kind, f.query.as_str()), (View::Finder, FinderKind::Grep, "x"));
-        // ⌫ edits, then on the empty query goes back to the listing, prompt focused
+        assert_eq!((f.kind, f.query.as_str()), (FinderKind::Grep, "x"));
+        // ⌫ edits, then on the empty query goes back to All, then to the explorer
         key(&mut app, KeyCode::Backspace);
         key(&mut app, KeyCode::Backspace);
-        assert!(app.view == View::Explorer && app.prompt);
-        // typing there searches files and folders
-        key(&mut app, KeyCode::Char('a'));
-        assert_eq!((app.view, app.finder.as_ref().unwrap().kind), (View::Finder, FinderKind::All));
-        key(&mut app, KeyCode::Backspace);
-        assert!(app.view == View::Explorer && app.prompt);
-        // ␣ on an empty grep query: the menu; a letter picks
-        app.prompt = false;
-        key(&mut app, KeyCode::Char('/'));
+        assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::All);
+        assert_eq!(app.view, View::Finder);
+        // ␣ on the empty query: the menu; a letter picks
         key(&mut app, KeyCode::Char(' '));
         assert!(app.finder_menu);
         key(&mut app, KeyCode::Char('p'));
         assert!(!app.finder_menu);
         assert_eq!(app.finder.as_ref().unwrap().kind, FinderKind::Projects);
         key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Backspace);
         assert_eq!(app.view, View::Explorer);
-    }
-
-    #[test]
-    fn results_focus_is_read_only_and_opens_folders() {
-        let (t, mut app) = app_in("app-results");
-        std::fs::write(t.0.join("src/deep/needle.rs"), "x").unwrap();
-        let key = |app: &mut App, c: KeyCode| app.key(KeyEvent::new(c, KeyModifiers::NONE));
-        key(&mut app, KeyCode::Tab);
-        for c in "needle".chars() {
-            key(&mut app, KeyCode::Char(c));
-        }
-        let t0 = Instant::now();
-        while app.finder.as_ref().unwrap().len() == 0 && t0.elapsed() < Duration::from_secs(5) {
-            app.finder.as_mut().unwrap().tick();
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        // esc: focus on the results (NORMAL); letters move, nothing is typed
-        key(&mut app, KeyCode::Esc);
-        assert!(app.finder_list);
-        assert!(screen(&mut app, 100, 20).last().unwrap().contains("NORMAL"));
-        key(&mut app, KeyCode::Char('x'));
-        assert_eq!(app.finder.as_ref().unwrap().query, "needle");
-        // ⏎ opens the row's folder in the listing, on the row
-        key(&mut app, KeyCode::Enter);
-        assert_eq!((app.view, app.cwd.clone()), (View::Explorer, std::fs::canonicalize(t.0.join("src/deep")).unwrap()));
-        assert_eq!(app.buf().cur().name(&app.store), "needle.rs");
-        assert!(app.finder.as_ref().unwrap().query.is_empty() && !app.finder_list);
-        // q in the results closes the popup
-        key(&mut app, KeyCode::Char('/'));
-        key(&mut app, KeyCode::Tab);
-        key(&mut app, KeyCode::Char('q'));
-        assert!(app.quit);
     }
 
     #[test]
@@ -2852,20 +2719,22 @@ mod tests {
     #[test]
     fn finder_chrome() {
         let (_t, mut app) = app_in("app-quiet");
-        let key = |app: &mut App, c: KeyCode| app.key(KeyEvent::new(c, KeyModifiers::NONE));
-        // the listing under the sources row and an empty prompt; NORMAL until ⇥
+        let key = |app: &mut App, c: KeyCode| app.finder_key(KeyEvent::new(c, KeyModifiers::NONE));
+        app.act(Action::Finder(FinderKind::All));
         let rows = screen(&mut app, 120, 20);
         let text = rows.join("\n");
-        assert!(rows[0].contains("› files") && rows[0].contains("/ grep") && rows[0].contains("+ changes"), "{text}");
+        // the sources, a gap, the prompt, a gap, the panel headings
+        assert!(rows[0].contains("› all") && rows[0].contains("/ grep") && rows[0].contains("+ changes"), "{text}");
         assert!(rows[1].trim().is_empty() && rows[3].trim().is_empty(), "{text}");
         assert!(rows[2].contains("› files & folders"), "{text}");
-        assert!(text.contains("src/") && rows.last().unwrap().contains("NORMAL"), "{text}");
-        key(&mut app, KeyCode::Tab);
-        let rows = screen(&mut app, 120, 20);
-        assert!(rows[2].contains("or start with / + < @ to switch") && rows.last().unwrap().contains("INSERT"), "{}", rows.join("\n"));
+        assert!(rows[4].contains("TO TRIAGE"), "{text}");
+        assert!(rows.last().unwrap().contains("FIND") && rows.last().unwrap().contains("? keys"), "{text}");
+        // after two idle seconds the placeholder names the sigils
+        app.last_key = Instant::now() - Duration::from_secs(3);
+        assert!(screen(&mut app, 120, 20).join("\n").contains("or start with / + < @ to switch"));
         key(&mut app, KeyCode::Char('@'));
         let rows = screen(&mut app, 120, 20);
-        assert!(rows[2].contains("@ project or branch") && rows.last().unwrap().contains("INSERT"), "{}", rows.join("\n"));
+        assert!(rows[2].contains("@ project or branch"), "{}", rows.join("\n"));
         // a short pane keeps only the prompt and the list
         let rows = screen(&mut app, 120, 10);
         assert!(rows[0].contains("@ project or branch") && !rows.iter().any(|r| r.contains("PROJECTS")), "{}", rows.join("\n"));

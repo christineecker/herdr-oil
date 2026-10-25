@@ -150,8 +150,6 @@ pub enum Action {
     HitsOnly(bool),
     /// `n` / `N` after `g/`: the next / previous row with hits.
     NextHit(bool),
-    /// `⇥`: focus the popup's prompt; `/ + < @` also type that sigil.
-    Prompt(Option<char>),
 }
 
 /// What `gy` / `gY` / `gn` copy.
@@ -1092,7 +1090,11 @@ impl Vim {
             KeyCode::Char(c) => c,
             KeyCode::Enter => '\n',
             KeyCode::Esc => {
-                // cancels a half-typed command; the popup closes with q
+                // First cancel a half-typed command; Esc on a clean slate closes
+                // the popup (the app asks first when there are unsaved edits).
+                if self.pending.is_empty() {
+                    return Action::Quit;
+                }
                 self.pending.clear();
                 return Action::None;
             }
@@ -1102,7 +1104,7 @@ impl Vim {
             }
             KeyCode::Tab => {
                 self.pending.clear();
-                return Action::Prompt(None);
+                return Action::Finder(FinderKind::All);
             }
             KeyCode::Up => 'k',
             KeyCode::Down => 'j',
@@ -1305,12 +1307,7 @@ impl Vim {
                 self.mode = Mode::Cmd { kind: ':', text: String::new(), cur: 0, origin: (b.row, b.col) };
                 Parse::Done
             }
-            // `/` greps (from the prompt); `?` searches the names
-            '/' | '+' | '<' | '@' => {
-                *act = Action::Prompt(Some(c));
-                Parse::Done
-            }
-            '?' => {
+            '/' | '?' => {
                 self.mode = Mode::Cmd { kind: '/', text: String::new(), cur: 0, origin: (b.row, b.col) };
                 Parse::Done
             }
@@ -2179,8 +2176,7 @@ mod tests {
         assert_eq!(keys(&mut v, &mut b, "yygm"), [Action::Transfer { copy: false }]);
         assert_eq!(keys(&mut v, &mut b, "gc"), [Action::Transfer { copy: true }]);
         assert_eq!(keys(&mut v, &mut b, "d\x1b"), []);
-        assert_eq!(keys(&mut v, &mut b, "\x1b"), []);
-        assert_eq!(keys(&mut v, &mut b, "/"), [Action::Prompt(Some('/'))]);
+        assert_eq!(keys(&mut v, &mut b, "\x1b"), [Action::Quit]);
         assert_eq!(keys(&mut v, &mut b, "ix\x1b"), []);
         assert_eq!(keys(&mut v, &mut b, "g."), [Action::ToggleHidden]);
         assert_eq!(keys(&mut v, &mut b, ":w\n"), [Action::Save]);
@@ -2197,9 +2193,9 @@ mod tests {
     fn search_jumps() {
         let mut b = buf(&[(Some(1), "alpha"), (Some(2), "beta"), (Some(3), "gamma")]);
         let mut v = Vim::default();
-        keys(&mut v, &mut b, "?gam\n");
+        keys(&mut v, &mut b, "/gam\n");
         assert_eq!(b.row, 2);
-        keys(&mut v, &mut b, "?a\nn");
+        keys(&mut v, &mut b, "/a\nn");
         assert_eq!(b.row, 1);
     }
 
@@ -2448,7 +2444,7 @@ mod tests {
         up(&mut v, &mut b, KeyCode::Down);
         up(&mut v, &mut b, KeyCode::Down);
         assert_eq!(text(&v), "so");
-        keys(&mut v, &mut b, "\x1b?b\n?");
+        keys(&mut v, &mut b, "\x1b/b\n/");
         up(&mut v, &mut b, KeyCode::Up);
         assert_eq!(text(&v), "b");
     }
