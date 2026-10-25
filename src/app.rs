@@ -1822,6 +1822,8 @@ impl App {
         let Some(f) = self.finder.as_mut() else { return };
         let mut open_how: Option<OpenTarget> = None;
         let mut edited = None;
+        // grep tree: the folder row under the cursor
+        let tree_dir = if f.tree_view() { f.selected().filter(|it| it.is_dir).map(|it| it.abs) } else { None };
         match (k.code, ctrl, alt) {
             (KeyCode::Esc, _, _) | (KeyCode::Char('c'), true, _) | (KeyCode::Char('q'), true, _) => {
                 if self.finder_only || (k.code == KeyCode::Char('c') && ctrl) {
@@ -1907,6 +1909,24 @@ impl App {
             (KeyCode::Char('t'), true, _) => open_how = Some(OpenTarget::Tab),
             (KeyCode::Char('e'), true, _) => open_how = Some(OpenTarget::Popup),
             (KeyCode::Char('g'), true, _) => open_how = Some(OpenTarget::System),
+            (KeyCode::Char('t'), _, true) if f.kind == FinderKind::Grep => {
+                f.toggle_tree();
+                self.preview_scroll = 0;
+                return;
+            }
+            (KeyCode::Left | KeyCode::Right, false, false) if f.tree_view() => {
+                f.fold(k.code == KeyCode::Right);
+                self.preview_scroll = 0;
+                return;
+            }
+            (KeyCode::Char('o'), true, _) if tree_dir.is_some() => {
+                if let Some(d) = tree_dir {
+                    self.goto(&d, None);
+                    self.view = View::Explorer;
+                    self.finder_only = false;
+                }
+                return;
+            }
             (KeyCode::Char('o'), true, _) => {
                 if let Some(it) = f.selected() {
                     self.reveal(&it.abs);
@@ -1935,6 +1955,12 @@ impl App {
                 };
                 self.send_paths(paths);
                 return;
+            }
+            (KeyCode::Char('r'), true, _) if tree_dir.is_some() => {
+                // a folder row: search again inside it
+                if let Some(d) = tree_dir {
+                    f.set_root(d);
+                }
             }
             (KeyCode::Char('r'), true, _) => {
                 let repo = finder::repo_root(&self.cwd);

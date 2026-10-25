@@ -52,7 +52,9 @@ the explorer's `␣` keys) and `?` one sheet with the sources, every key for
 the current source, the view keys and the query syntax; `⇥` jumps to the next group: the next file in grep, the next section in Dash,
 the next folder elsewhere. The sources:
 **Files** and **Dirs** (parallel walk honouring `.gitignore`, nucleo fuzzy
-matching, fzf query syntax), **Grep** (live ripgrep), **Recent** (files you
+matching, fzf query syntax), **Grep** (live ripgrep; `alt-t` nests the hits
+under their folders and files, with hit counts, and is remembered),
+**Recent** (files you
 opened through herdr-oil), **Git** (changed and untracked files across the
 whole repository; `⏎` opens the diff view, `^a` stages, `alt-d` discards) and
 **Dash** (pending edits, git changes, marked and recent files in one list) and
@@ -230,6 +232,8 @@ Line numbers from grep are passed as `+N` (vim, nvim, nano, micro, emacs, kak),
 | `foo -- *.rs -t py -T md` | grep: limit to globs / ripgrep file types |
 | `^s` | send the selection (or marked files, grep hits with `:line`) to the origin pane |
 | `alt-s` | send the grep lines themselves (`path:line: text`) to an agent |
+| grep: `alt-t` · `←` `→` | hits flat ⇄ as a tree (remembered) · fold · unfold |
+| grep tree, folder row: `^r` `^o` | search again inside it · open it in the explorer |
 | Git tab: `⏎` `^a` `alt-d` | diff view of every change · stage ⇄ unstage · discard (asks) |
 
 Vim support: counts, `h j k l w b e W B E 0 ^ $ gg G f F t T ;`, operators

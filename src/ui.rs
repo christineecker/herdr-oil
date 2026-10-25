@@ -878,6 +878,7 @@ fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
     let rows: &[(&str, &str)] = match cur {
         FinderKind::Projects => &[("⏎", "hop (focus or open its workspace)"), ("^t", "new tab"), ("^o", "explore"), ("^f alt-g", "files / grep inside"), ("^n", "new project from query"), ("^x", "forget"), ("^k ^k", "close its workspace or tab")],
         FinderKind::Git => &[("⏎", "diff view"), ("^a", "stage ⇄ unstage"), ("alt-d", "discard"), ("^space", "mark"), ("^s", "send")],
+        FinderKind::Grep => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines"), ("alt-t", "tree ⇄ flat"), ("← →", "tree: fold / unfold"), ("^r", "tree folder: search inside")],
         _ => &[("⏎", "open"), ("^v ^x", "split right / down"), ("^t ^e", "tab / popup"), ("^g", "system app"), ("^o", "reveal"), ("^y", "copy path"), ("^space", "mark"), ("^s alt-s", "send paths / lines")],
     };
     let mut view: Vec<(&str, &str)> = vec![("⇥", "next group"), ("^r", "root"), ("alt-h alt-i", "hidden / ignored"), ("alt-p", "preview"), ("esc", "back")];
@@ -1048,7 +1049,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     // count, root, flags: the title bar's right side
     let filtering = !fd.query.is_empty();
     let (n, what) = match fd.kind {
-        FinderKind::Grep => (fd.len(), " hits".to_string()),
+        FinderKind::Grep => (fd.hits(), " hits".to_string()),
         _ if fd.zero_view() => (fd.len(), " to triage".to_string()),
         _ if filtering => (fd.len(), format!(" of {}", fd.total())),
         _ => (fd.total(), String::new()),
@@ -1188,7 +1189,8 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::styled(rule, Style::default().fg(th.dim))), sep);
     if roomy {
         let title = list_head(fd.kind, fd.zero_view(), transfer.is_some());
-        let count = vec![Span::styled(format!("{} ", fd.len()), dim)];
+        let total = if fd.kind == FinderKind::Grep { fd.hits() } else { fd.len() };
+        let count = vec![Span::styled(format!("{total} "), dim)];
         f.render_widget(Paragraph::new(spread(vec![Span::styled(format!(" {title}"), Style::default().fg(th.subtext).add_modifier(Modifier::BOLD))], count, lhead.width as usize)), lhead);
     }
     let h = list_inner.height as usize;
@@ -1224,6 +1226,15 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some(p) = &it.proj {
             sp.pop();
             sp.extend(project_row(&th, p, &it.display, &it.indices, w, hl));
+            let mut line = Line::from(sp);
+            if is_sel {
+                line = line.style(Style::default().bg(th.selection));
+            }
+            lines.push(line);
+            continue;
+        }
+        if let Some(nd) = it.tree {
+            sp.extend(tree_row(&th, it, nd, w.saturating_sub(spans_w(&sp)), &query, hl));
             let mut line = Line::from(sp);
             if is_sel {
                 line = line.style(Style::default().bg(th.selection));
@@ -1313,6 +1324,31 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// A grep tree row in `w` cells: indent, then a folder or file with its
+/// fold glyph and hit count (right-aligned), or a hit's line number and text.
+fn tree_row(th: &Theme, it: &crate::finder::Item, nd: crate::finder::Node, w: usize, query: &str, hl: Style) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(th.dim);
+    let mut sp = vec![Span::raw("  ".repeat(nd.depth))];
+    if let Some(text) = &it.grep_text {
+        sp.push(Span::styled(format!("{:>4}  ", it.line.unwrap_or(0)), dim));
+        let room = w.saturating_sub(spans_w(&sp));
+        let t: String = text.trim_start().chars().take(room).collect();
+        let idx = substr_indices(&t, query);
+        sp.extend(highlight(&t, &idx, Style::default().fg(th.text), hl));
+        return sp;
+    }
+    sp.push(Span::styled(if nd.folded { "▸ " } else { "▾ " }, dim));
+    let (ic, col) = entry::icon(&it.display, if it.is_dir { Kind::Dir } else { Kind::File });
+    sp.push(Span::styled(format!("{ic} "), Style::default().fg(icon_color(th, col))));
+    let count = format!(" {} ", nd.hits);
+    let name = format!("{}{}", it.display, if it.is_dir { "/" } else { "" });
+    let st = if it.is_dir { Style::default().fg(th.accent).add_modifier(Modifier::BOLD) } else { Style::default().fg(th.blue) };
+    sp.push(Span::styled(clip(&name, w.saturating_sub(spans_w(&sp) + count.width()), true), st));
+    sp.push(Span::raw(" ".repeat(w.saturating_sub(spans_w(&sp) + count.width()))));
+    sp.push(Span::styled(count, dim));
+    sp
+}
+
 /// Finder footer: at most two verbs for the selected row (or the marks).
 fn finder_foot(kind: FinderKind, it: Option<&crate::finder::Item>, marked: usize, transfer: Option<(bool, usize)>, query: &str) -> Vec<(String, String)> {
     let p = |k: &str, v: String| (k.to_string(), v);
@@ -1341,6 +1377,13 @@ fn finder_foot(kind: FinderKind, it: Option<&crate::finder::Item>, marked: usize
     if kind == FinderKind::Git {
         let staged = it.git.is_some_and(|g| g.staged && !g.unstaged);
         return vec![p("⏎", "diff".into()), p("^a", if staged { "unstage" } else { "stage" }.into())];
+    }
+    if let Some(nd) = it.tree.filter(|_| it.grep_text.is_none()) {
+        return match (it.is_dir, nd.folded) {
+            (true, _) => vec![p("⏎", "explore".into()), p("^r", "search here".into())],
+            (false, true) => vec![p("⏎", "open".into()), p("→", "unfold".into())],
+            (false, false) => vec![p("⏎", "open".into()), p("←", "fold".into())],
+        };
     }
     if it.is_dir {
         return vec![p("⏎", "explore".into())];

@@ -44,6 +44,24 @@ pub struct Item {
     pub tag: Option<char>,
     /// Projects tab: the project behind the row.
     pub proj: Option<Proj>,
+    /// Grep tree: the row's place in it.
+    pub tree: Option<Node>,
+}
+
+/// A grep tree row's depth; folder and file rows also carry their hit
+/// count and whether they are folded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Node {
+    pub depth: usize,
+    pub hits: usize,
+    pub folded: bool,
+}
+
+/// Grep tree rows; `File` and `Hit` index into the hits.
+enum TRow {
+    Dir { abs: PathBuf, name: String, node: Node },
+    File { idx: usize, node: Node },
+    Hit { idx: usize, depth: usize },
 }
 
 pub struct Finder {
@@ -83,6 +101,16 @@ pub struct Finder {
     pub proj_settings: projects::Settings,
     /// Where the finder was opened: marks the project you are in.
     here: PathBuf,
+    /// Grep: hits nested under their folder and file (`alt-t`, remembered
+    /// in `tree_file`).
+    pub tree: bool,
+    tree_file: PathBuf,
+    /// Grep tree: folded folder and file rows.
+    folded: std::collections::HashSet<PathBuf>,
+    /// Bumped when the hits are cleared or a row folds; with the hit count
+    /// it keys `tree_rows`.
+    tree_gen: u64,
+    tree_rows: std::cell::RefCell<(u64, usize, Vec<TRow>)>,
 }
 
 struct Grep {
@@ -197,6 +225,11 @@ impl Finder {
             proj_scope: Scope::All,
             proj_settings: cfg.projects.clone(),
             here,
+            tree: cfg.state_dir.join("grep-tree").exists(),
+            tree_file: cfg.state_dir.join("grep-tree"),
+            folded: Default::default(),
+            tree_gen: 0,
+            tree_rows: std::cell::RefCell::new((u64::MAX, 0, vec![])),
         };
         f.restart();
         f
@@ -302,6 +335,7 @@ impl Finder {
         if let Ok(mut h) = self.grep.hits.lock() {
             h.clear();
         }
+        self.tree_gen += 1;
         self.reparse(false);
         match self.kind {
             FinderKind::All => {
@@ -580,6 +614,7 @@ impl Finder {
         if let Ok(mut h) = self.grep.hits.lock() {
             h.clear();
         }
+        self.tree_gen += 1;
         self.grep.truncated.store(false, Ordering::Relaxed);
         let q = self.query.clone();
         self.grep.launched = Some(q.clone());
@@ -660,8 +695,90 @@ impl Finder {
         });
     }
 
+    /// Grep hits found so far (the tree view lists more rows than that).
+    pub fn hits(&self) -> usize {
+        self.grep.hits.lock().map(|h| h.len()).unwrap_or(0)
+    }
+
+    pub fn tree_view(&self) -> bool {
+        self.kind == FinderKind::Grep && self.tree
+    }
+
+    /// The grep tree rows, rebuilt when the hits or the folds changed.
+    fn with_rows<R>(&self, f: impl FnOnce(&[TRow], &[Hit]) -> R) -> R {
+        let hs = self.grep.hits.lock().unwrap();
+        let mut c = self.tree_rows.borrow_mut();
+        if c.0 != self.tree_gen || c.1 != hs.len() {
+            *c = (self.tree_gen, hs.len(), build_tree(&hs, &self.root, &self.folded));
+        }
+        f(&c.2, &hs)
+    }
+
+    /// `alt-t`: grep hits flat ⇄ as a tree. The choice is remembered, and
+    /// the cursor stays on the same hit (or the first one under its row).
+    pub fn toggle_tree(&mut self) {
+        let cur = self.selected().map(|it| (it.abs, it.line));
+        self.tree = !self.tree;
+        if self.tree {
+            if let Some(d) = self.tree_file.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&self.tree_file, "");
+        } else {
+            let _ = std::fs::remove_file(&self.tree_file);
+        }
+        self.scroll = 0;
+        let n = self.len();
+        let items = self.items(0, n);
+        self.sel = cur
+            .and_then(|c| items.iter().position(|it| (&it.abs, it.line) == (&c.0, c.1)).or_else(|| items.iter().position(|it| it.abs.starts_with(&c.0))))
+            .unwrap_or(0);
+    }
+
+    /// Grep tree ← / →. ← folds the row; on a hit it folds the hit's file,
+    /// on a folded row it moves to the parent. → unfolds, or on an open row
+    /// moves to its first child.
+    pub fn fold(&mut self, open: bool) {
+        if !self.tree_view() {
+            return;
+        }
+        let sel = self.sel;
+        let at = |rows: &[TRow], hits: &[Hit], i: usize| -> Option<(PathBuf, Node, bool)> {
+            Some(match rows.get(i)? {
+                TRow::Dir { abs, node, .. } => (abs.clone(), *node, false),
+                TRow::File { idx, node } => (hits[*idx].path.clone(), *node, false),
+                TRow::Hit { idx, depth } => (hits[*idx].path.clone(), Node { depth: *depth, ..Default::default() }, true),
+            })
+        };
+        let Some((abs, node, hit, parent, child)) = self.with_rows(|rows, hits| {
+            let (abs, node, hit) = at(rows, hits, sel)?;
+            let parent = (0..sel).rev().find(|&i| at(rows, hits, i).is_some_and(|r| r.1.depth < node.depth));
+            let child = at(rows, hits, sel + 1).is_some_and(|r| r.1.depth > node.depth);
+            Some((abs, node, hit, parent, child))
+        }) else {
+            return;
+        };
+        if open {
+            if node.folded {
+                self.folded.remove(&abs);
+            } else if child {
+                self.sel += 1;
+            }
+        } else if hit || !node.folded {
+            if hit {
+                // the hit's file row sits above it
+                self.sel = parent.unwrap_or(sel);
+            }
+            self.folded.insert(abs);
+        } else if let Some(p) = parent {
+            self.sel = p;
+        }
+        self.tree_gen += 1;
+    }
+
     pub fn len(&self) -> usize {
         match self.kind {
+            FinderKind::Grep if self.tree => self.with_rows(|rows, _| rows.len()),
             FinderKind::Grep => self.grep.hits.lock().map(|h| h.len()).unwrap_or(0),
             _ if self.zero_view() => self.zero.snapshot().matched_item_count() as usize,
             _ => self.nucleo.snapshot().matched_item_count() as usize,
@@ -675,13 +792,36 @@ impl Finder {
         if start >= end {
             return vec![];
         }
+        if self.tree_view() {
+            let root = self.root.clone();
+            return self.with_rows(|rows, hits| {
+                rows[start..end]
+                    .iter()
+                    .map(|r| {
+                        let it = |display: String, abs: PathBuf, is_dir: bool, node: Node| Item { display, abs, line: None, indices: vec![], is_dir, grep_text: None, git: None, tag: None, proj: None, tree: Some(node) };
+                        match r {
+                            TRow::Dir { abs, name, node } => it(name.clone(), abs.clone(), true, *node),
+                            TRow::File { idx, node } => {
+                                let p = &hits[*idx].path;
+                                it(p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), p.clone(), false, *node)
+                            }
+                            TRow::Hit { idx, depth } => {
+                                let h = &hits[*idx];
+                                let rel = h.path.strip_prefix(&root).unwrap_or(&h.path).display().to_string();
+                                Item { line: Some(h.line), grep_text: Some(h.text.clone()), ..it(rel, h.path.clone(), false, Node { depth: *depth, ..Default::default() }) }
+                            }
+                        }
+                    })
+                    .collect()
+            });
+        }
         if self.kind == FinderKind::Grep {
             let hs = self.grep.hits.lock().unwrap();
             return hs[start..end]
                 .iter()
                 .map(|h| {
                     let rel = h.path.strip_prefix(&self.root).unwrap_or(&h.path).display().to_string();
-                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None, tag: None, proj: None }
+                    Item { display: rel, abs: h.path.clone(), line: Some(h.line), indices: vec![], is_dir: false, grep_text: Some(h.text.clone()), git: None, tag: None, proj: None, tree: None }
                 })
                 .collect();
         }
@@ -711,7 +851,7 @@ impl Finder {
             };
             let git = self.git.as_ref().filter(|_| matches!(self.kind, FinderKind::Git | FinderKind::Dash | FinderKind::All)).and_then(|m| m.get(&s).copied());
             let tag = dash.map(|(t, _)| *t).filter(|_| git.is_none());
-            out.push(Item { is_dir: s.ends_with('/') || proj.is_some(), display: s, abs, line: None, indices: idx, grep_text: None, git, tag, proj });
+            out.push(Item { is_dir: s.ends_with('/') || proj.is_some(), display: s, abs, line: None, indices: idx, grep_text: None, git, tag, proj, tree: None });
         }
         out
     }
@@ -793,6 +933,10 @@ impl Drop for Finder {
 }
 
 fn group_key(it: &Item, dash: bool) -> String {
+    if it.tree.is_some() {
+        // a file row and its hits share the file; each folder row stands alone
+        return it.abs.display().to_string();
+    }
     if it.grep_text.is_some() {
         return it.display.clone();
     }
@@ -808,6 +952,63 @@ fn group_key(it: &Item, dash: bool) -> String {
     }
     let d = it.display.trim_end_matches('/');
     d.rfind('/').map(|i| d[..i].to_string()).unwrap_or_default()
+}
+
+/// Nest the hits under their folders and files: folders before files at
+/// every level, each sorted by name, a file's hits in line order. Rows
+/// under a folded folder or file are left out.
+fn build_tree(hits: &[Hit], root: &Path, folded: &std::collections::HashSet<PathBuf>) -> Vec<TRow> {
+    let mut files: Vec<(Vec<String>, Vec<usize>)> = Vec::new();
+    let mut at: std::collections::HashMap<&Path, usize> = Default::default();
+    for (i, h) in hits.iter().enumerate() {
+        let n = *at.entry(h.path.as_path()).or_insert_with(|| {
+            let rel = h.path.strip_prefix(root).unwrap_or(&h.path);
+            files.push((rel.iter().map(|c| c.to_string_lossy().into_owned()).collect(), vec![]));
+            files.len() - 1
+        });
+        files[n].1.push(i);
+    }
+    let key = |c: &[String]| -> Vec<(bool, String)> { c.iter().enumerate().map(|(j, s)| (j + 1 == c.len(), s.clone())).collect() };
+    files.sort_by_cached_key(|f| key(&f.0));
+    let mut count: std::collections::HashMap<Vec<String>, usize> = Default::default();
+    for (c, idx) in &files {
+        for k in 1..c.len() {
+            *count.entry(c[..k].to_vec()).or_default() += idx.len();
+        }
+    }
+    let mut rows = Vec::new();
+    // folders open above the current file, and the depth of a folded one
+    let mut open: Vec<String> = Vec::new();
+    let mut hide: Option<usize> = None;
+    for (c, idx) in &files {
+        let dirs = &c[..c.len() - 1];
+        let same = open.iter().zip(dirs).take_while(|(a, b)| a == b).count();
+        open.truncate(same);
+        if hide.is_some_and(|d| same <= d) {
+            hide = None;
+        }
+        for (d, name) in dirs.iter().enumerate().skip(same) {
+            open.push(name.clone());
+            if hide.is_none() {
+                let abs = open.iter().fold(root.to_path_buf(), |p, c| p.join(c));
+                let f = folded.contains(&abs);
+                rows.push(TRow::Dir { node: Node { depth: d, hits: count[&open], folded: f }, abs, name: name.clone() });
+                if f {
+                    hide = Some(d);
+                }
+            }
+        }
+        if hide.is_some() {
+            continue;
+        }
+        let depth = dirs.len();
+        let f = folded.contains(&hits[idx[0]].path);
+        rows.push(TRow::File { idx: idx[0], node: Node { depth, hits: idx.len(), folded: f } });
+        if !f {
+            rows.extend(idx.iter().map(|&i| TRow::Hit { idx: i, depth: depth + 1 }));
+        }
+    }
+    rows
 }
 
 fn plan_normalize(p: &Path) -> PathBuf {
@@ -1001,6 +1202,7 @@ mod tests {
         assert!(!items[0].indices.is_empty());
 
         f.set_kind(FinderKind::Grep);
+        f.tree = false;
         f.query = "haystack".into();
         f.query_changed(true);
         std::thread::sleep(Duration::from_millis(200));
@@ -1077,6 +1279,7 @@ mod tests {
         std::fs::write(t.0.join("b.txt"), "hay\n").unwrap();
         let cfg = crate::config::Config::default();
         let mut f = Finder::new(FinderKind::Grep, t.0.clone(), &cfg);
+        f.tree = false;
         f.query = "hay".into();
         f.query_changed(true);
         std::thread::sleep(Duration::from_millis(200));
@@ -1093,6 +1296,61 @@ mod tests {
         assert_eq!(f.sel, 0, "wraps");
         f.jump_group(-1);
         assert_eq!(f.sel, first_other, "back wraps to the last group");
+    }
+
+    #[test]
+    fn grep_tree_nests_folds_and_remembers() {
+        let t = crate::plan::tests::tmpdir("finder-tree");
+        std::fs::create_dir_all(t.0.join("src/deep")).unwrap();
+        std::fs::write(t.0.join("src/deep/a.rs"), "hay\nx\nhay\n").unwrap();
+        std::fs::write(t.0.join("src/b.rs"), "hay\n").unwrap();
+        std::fs::write(t.0.join("top.txt"), "hay\n").unwrap();
+        let cfg = crate::config::Config { state_dir: t.0.join(".state"), ..Default::default() };
+        let mut f = Finder::new(FinderKind::Grep, t.0.clone(), &cfg);
+        assert!(!f.tree);
+        f.query = "hay".into();
+        f.query_changed(true);
+        std::thread::sleep(Duration::from_millis(200));
+        let t0 = Instant::now();
+        while (f.hits() < 4 || f.walking()) && t0.elapsed() < Duration::from_secs(5) {
+            f.tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // the cursor stays on the hit it was on
+        f.sel = (0..4).find(|&i| f.items(i, i + 1)[0].abs.ends_with("b.rs")).unwrap();
+        f.toggle_tree();
+        assert!(t.0.join(".state/grep-tree").exists());
+        let rows = |f: &mut Finder| -> Vec<String> {
+            let n = f.len();
+            f.items(0, n)
+                .iter()
+                .map(|it| {
+                    let nd = it.tree.unwrap();
+                    let fold = if nd.folded { "+" } else { "" };
+                    match it.line {
+                        Some(l) => format!("{}{l}", "  ".repeat(nd.depth)),
+                        None => format!("{}{}{fold} {}", "  ".repeat(nd.depth), it.display, nd.hits),
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(rows(&mut f), ["src 3", "  deep 2", "    a.rs 2", "      1", "      3", "  b.rs 1", "    1", "top.txt 1", "  1"]);
+        assert_eq!(f.sel, 6, "on b.rs:1");
+        // ← on a hit folds its file and lands on it; ← again goes to the parent
+        f.fold(false);
+        assert_eq!((f.sel, rows(&mut f)[5].as_str()), (5, "  b.rs+ 1"));
+        f.fold(false);
+        assert_eq!(f.sel, 0);
+        f.fold(false);
+        assert_eq!(rows(&mut f), ["src+ 3", "top.txt 1", "  1"]);
+        f.fold(true);
+        f.fold(true);
+        assert_eq!(f.sel, 1, "→ on an open row goes to its first child");
+        // a new finder starts in the remembered view
+        assert!(Finder::new(FinderKind::Grep, t.0.clone(), &cfg).tree);
+        f.toggle_tree();
+        assert!(!t.0.join(".state/grep-tree").exists());
+        assert_eq!(f.len(), 4);
     }
 
     #[test]
