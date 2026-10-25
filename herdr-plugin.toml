@@ -41,7 +41,7 @@ command = ["./target/release/herdr-oil", "--launch", "explorer"]
 [[actions]]
 id = "finder"
 title = "Oil: find…"
-description = "One prompt for files and folders at the focused pane's cwd; / @ + < switch to grep, projects, changes, recent."
+description = "One prompt for files and folders at the focused pane's cwd; / + < @ switch to grep, changes, recent, projects."
 contexts = ["workspace"]
 command = ["./target/release/herdr-oil", "--launch", "finder"]
 

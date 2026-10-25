@@ -893,7 +893,7 @@ fn draw_finder_sheet(f: &mut Frame, th: &Theme, area: Rect, cur: FinderKind) {
     let head = |t: &str| Span::styled(format!(" {t:<8}"), Style::default().fg(th.dim));
     let mut lines = vec![];
     let mut src = vec![head("source")];
-    for k in [FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent] {
+    for k in [FinderKind::Grep, FinderKind::Git, FinderKind::Recent, FinderKind::Projects] {
         src.push(Span::styled(format!("{} ", k.sigil().unwrap_or(' ')), Style::default().fg(kind_color(th, k)).add_modifier(Modifier::BOLD)));
         src.push(Span::styled(format!("{}  ", k.label().to_lowercase()), Style::default().fg(th.text)));
     }
@@ -1091,7 +1091,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
         right.push(Span::styled(trunc, Style::default().fg(th.peach)));
         right.push(Span::raw(" "));
         let lead = if matches!(fd.kind, FinderKind::Files | FinderKind::Dirs | FinderKind::Dash) { fd.kind } else { FinderKind::All };
-        let tabs: Vec<Vec<Span<'static>>> = [lead, FinderKind::Grep, FinderKind::Projects, FinderKind::Git, FinderKind::Recent]
+        let tabs: Vec<Vec<Span<'static>>> = [lead, FinderKind::Grep, FinderKind::Git, FinderKind::Recent, FinderKind::Projects]
             .into_iter()
             .map(|k| {
                 // the current source in its colour, the others dim
@@ -1148,7 +1148,7 @@ fn draw_finder(f: &mut Frame, app: &mut App, area: Rect) {
     let lead_w = spans_w(&ps) + spans_w(&bx);
     if fd.query.is_empty() {
         // on hesitation an empty All / Files prompt names the sigils too
-        let switch = if idle && transfer.is_none() && matches!(fd.kind, FinderKind::All | FinderKind::Files) { " · or start with / @ + < to switch" } else { "" };
+        let switch = if idle && transfer.is_none() && matches!(fd.kind, FinderKind::All | FinderKind::Files) { " · or start with / + < @ to switch" } else { "" };
         let room = box_w.saturating_sub(spans_w(&bx) + 1);
         bx.push(Span::styled(clip(&format!("{ph}{switch}"), room, false), Style::default().fg(th.dim).add_modifier(Modifier::ITALIC)));
     } else {
@@ -2036,7 +2036,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Finder (⇥ or ␣␣ all · ␣f files · ␣g grep · ␣d dirs · ␣r recent · ␣s git · ␣p projects · ␣h dash)", &[
         ("type", "fuzzy query ('exact ^prefix suffix$ !not)"),
-        ("/ @ + <  typed first", "switch to grep · projects · changes · recent (from All or Files)"),
+        ("/ + < @  typed first", "switch to grep · changes · recent · projects (from All or Files)"),
         ("empty query in All", "pending edits, git changes, marked and recent files"),
         ("␣ or ? on empty", "pick a source: a f d g r s p h"),
         ("⌫ on empty", "back to All, then to the explorer"),

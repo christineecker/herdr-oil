@@ -2547,7 +2547,7 @@ mod tests {
         assert!(rows.last().unwrap().contains("FIND") && rows.last().unwrap().contains("? keys"), "{text}");
         // after two idle seconds the placeholder names the sigils
         app.last_key = Instant::now() - Duration::from_secs(3);
-        assert!(screen(&mut app, 120, 20).join("\n").contains("or start with / @ + < to switch"));
+        assert!(screen(&mut app, 120, 20).join("\n").contains("or start with / + < @ to switch"));
         key(&mut app, KeyCode::Char('@'));
         let rows = screen(&mut app, 120, 20);
         assert!(rows[2].contains("@ project or branch"), "{}", rows.join("\n"));

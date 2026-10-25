@@ -34,7 +34,7 @@ The finder (`⇥` from the explorer, or its own key) is one prompt. It opens
 on **All**: files and folders from one walk, and while the query is empty the
 Dash rows (pending edits, changes, marked and recent files). A first character
 picks another source and stays in front of the query as its sigil: `/` grep,
-`@` projects, `+` git changes, `<` recent (`/fn main` greps for `fn main`).
+`+` git changes, `<` recent, `@` projects (`/fn main` greps for `fn main`).
 None of these start an fzf term, so `'exact`, `^prefix` and `!not` still work.
 A row above it lists the sources (the current one in its colour), the
 count (`N of M` while filtering, `N to triage`, `N hits`), root and
