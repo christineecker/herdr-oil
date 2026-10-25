@@ -107,12 +107,14 @@ pub fn split_link(text: &str) -> (&str, Option<&str>) {
 
 /// Name and `-> target` of a buffer line. Only lines of listed symlinks
 /// (and new lines) are split: a regular file may well be called `a -> b`.
-/// A symlink line that still reads exactly as listed maps back to the
-/// entry's own name and target, whatever either contains.
+/// A symlink line that still reads exactly as listed (in a results list:
+/// after its folder path, `sub/` + listed) maps back to the entry's own
+/// name and target, whatever either contains.
 pub fn line_parts<'a>(text: &'a str, entry: Option<&crate::entry::Entry>) -> (&'a str, Option<&'a str>) {
+    let listed = |e: &crate::entry::Entry| text.strip_suffix(e.display().as_str()).is_some_and(|pre| pre.is_empty() || pre.ends_with('/'));
     match entry {
         Some(e) if e.link_target.is_none() => (text, None),
-        Some(e) if text == e.display() => {
+        Some(e) if listed(e) => {
             let t = e.link_target.as_deref().unwrap_or("");
             let n = text.len() - t.len() - " -> ".len();
             (&text[..n], Some(&text[n + " -> ".len()..]))
@@ -359,6 +361,18 @@ pub mod tests {
 
     fn line_of<'a>(b: &'a mut Buffer, text: &str) -> &'a mut Line {
         b.lines.iter_mut().find(|l| l.text == text).unwrap()
+    }
+
+    #[test]
+    fn results_symlink_named_with_arrow_maps_back() {
+        let (t, mut store, _) = setup("results-link");
+        std::os::unix::fs::symlink("t", t.0.join("sub/a -> b")).unwrap();
+        let mut b = Buffer::results(&t.0, vec![t.0.join("sub/a -> b")], &mut store);
+        assert_eq!(b.lines[0].text, "sub/a -> b -> t");
+        assert!(build([&b], &store).ops.is_empty(), "an unedited line plans nothing");
+        // moving it up keeps the name and target whole
+        b.lines[0].text = "a -> b -> t".into();
+        assert_eq!(build([&b], &store).ops, [Op::Move { src: t.0.join("sub/a -> b"), dst: t.0.join("a -> b"), dir: false }]);
     }
 
     #[test]
